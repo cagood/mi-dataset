@@ -1,25 +1,29 @@
 #!/usr/bin/env python
 
 """
-@package mi.dataset.parser.test.test_adcp_jln
-@fid marine-integrations/mi/dataset/parser/test/test_adcps_jln.py
+@package mi.dataset.parser.test
+@stream_handle marine-integrations/mi/dataset/parser/test/test_adcps_jln.py
 @author Jeff Roy
-@brief Test code for a Adcps_jln data parser
+@brief Test code for a adcps_jln data parser
 Parts of this test code were taken from test_adcpa.py
 Due to the nature of the records in PD0 files, (large binary records with hundreds of parameters)
 this code verifies select items in the parsed data particle
 """
+import copy
+import pprint
 
 from nose.plugins.attrib import attr
 import yaml
 import numpy
 import os
 
-from mi.core.log import get_logger; log = get_logger()
+from mi.core.log import get_logger
+log = get_logger()
+
 from mi.idk.config import Config
 from mi.dataset.test.test_parser import ParserUnitTestCase
 from mi.dataset.dataset_parser import DataSetDriverConfigKeys
-from mi.dataset.parser.adcp_pd0 import AdcpPd0Parser, StateKey
+from mi.dataset.parser.adcp_pd0 import AdcpPd0Parser
 
 RESOURCE_PATH = os.path.join(Config().base_dir(), 'mi', 'dataset',
                              'driver', 'adcps_jln', 'stc', 'resource')
@@ -28,210 +32,72 @@ RESOURCE_PATH = os.path.join(Config().base_dir(), 'mi', 'dataset',
 @attr('UNIT', group='mi')
 class AdcpsJlnParserUnitTestCase(ParserUnitTestCase):
     """
-    Adcp_jln Parser unit test suite
+    adcps_jln Parser unit test suite
     """
-    def state_callback(self, state, fid_ingested):
-        """ Call back method to watch what comes in via the position callback """
-        self.state_callback_value = state
-        self.fid_ingested_value = fid_ingested
-
-    def pub_callback(self, pub):
-        """ Call back method to watch what comes in via the publish callback """
-        self.publish_callback_value = pub
-
-    def exception_callback(self, exception):
-        """ Call back method to match what comes in via the exception callback """
-        self.exception_callback_value = exception
 
     def setUp(self):
         ParserUnitTestCase.setUp(self)
-        self.config = {DataSetDriverConfigKeys.PARTICLE_MODULE: 'mi.dataset.parser.adcps_jln',
-                       DataSetDriverConfigKeys.PARTICLE_CLASS: 'AdcpsJlnParticle'}
+        self.config = {
+            DataSetDriverConfigKeys.PARTICLE_CLASSES_DICT: {
+                'velocity': 'VelocityEarth',
+                'engineering': 'AdcpsEngineering',
+                'config': 'AdcpsConfig',
+                'bottom_track': 'EarthBottom',
+                'bottom_track_config': 'BottomConfig',
+            }
+        }
         # Define test data particles and their associated timestamps which will be
         # compared with returned results
 
-        self.start_state = {StateKey.POSITION: 0}
-
-        self.fid_ingested_value = None
-        self.state_callback_value = None
-        self.publish_callback_value = None
-
-        #test01 data was all manually verified against the IDD
-        #and double checked with PD0decoder_v2 MATLAB tool
-        self.test01 = {}
-        self.test01['internal_timestamp'] = 3581719370.030000
-        self.test01['ensemble_start_time'] = 3581719370.0299997329711914
-        self.test01['echo_intensity_beam1'] = [89, 51, 44, 43, 43, 43, 43, 44, 43, 44, 43, 43, 44, 44, 44,
-                                               43, 43, 44, 43, 44, 44, 43, 43, 44, 44, 44, 44, 44, 44, 44,
-                                               43, 43, 43, 43, 43, 43, 43, 44, 44, 43, 44, 44, 43, 43, 44,
-                                               43, 43, 44, 44, 43, 43, 44, 43, 43, 44]
-        self.test01['correlation_magnitude_beam1'] = [68, 70, 18, 19, 17, 17, 20, 19, 17, 15, 17, 20, 16,
-                                                      17, 16, 17, 17, 18, 18, 17, 17, 19, 18, 17, 17, 19,
-                                                      19, 17, 16, 16, 18, 19, 19, 17, 19, 19, 19, 18, 20,
-                                                      17, 19, 19, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        self.test01['percent_good_3beam'] = [53, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                                             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                                             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        self.test01['water_velocity_east'] = [383, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                              -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                              -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                              -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                              -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                              -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                              -32768, -32768, -32768, -32768, -32768, -32768, -32768]
-        self.test01['water_velocity_north'] = [314, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+        # test01 data was all manually verified against the IDD
+        # and double checked with PD0decoder_v2 MATLAB tool
+        self.test01 = {'internal_timestamp': 3581719370.030000,
+                       'echo_intensity_beam1': [89, 51, 44, 43, 43, 43, 43, 44, 43, 44, 43, 43, 44, 44, 44,
+                                                43, 43, 44, 43, 44, 44, 43, 43, 44, 44, 44, 44, 44, 44, 44,
+                                                43, 43, 43, 43, 43, 43, 43, 44, 44, 43, 44, 44, 43, 43, 44,
+                                                43, 43, 44, 44, 43, 43, 44, 43, 43, 44],
+                       'correlation_magnitude_beam1': [68, 70, 18, 19, 17, 17, 20, 19, 17, 15, 17, 20, 16,
+                                                       17, 16, 17, 17, 18, 18, 17, 17, 19, 18, 17, 17, 19,
+                                                       19, 17, 16, 16, 18, 19, 19, 17, 19, 19, 19, 18, 20,
+                                                       17, 19, 19, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                       'percent_good_3beam': [53, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                       'water_velocity_east': [383, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
                                                -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
                                                -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
                                                -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
                                                -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
                                                -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                               -32768, -32768, -32768, -32768, -32768, -32768, -32768]
-        self.test01['water_velocity_up'] = [459, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                            -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                            -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                            -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                            -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                            -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                            -32768]
-        self.test01['error_velocity'] = [80, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                         -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                         -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                         -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                         -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                         -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
-                                         -32768]
-        #test02 data was extracted using the PD0decoder_v2 MATLAB tool
-        #ensemble 1 of file ADCP_CCE1T_20.000
-        self.test02 = {}
-        self.test02['ensemble_number'] = 1
-        self.test02['real_time_clock'] = [12, 9, 21, 0, 0, 0, 0]
-        self.test02['heading'] = 21348
-        self.test02['pitch'] = 4216
-        self.test02['roll'] = 3980
+                                               -32768, -32768, -32768, -32768, -32768, -32768, -32768],
+                       'water_velocity_north': [314, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                                -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                                -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                                -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                                -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                                -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                                -32768, -32768, -32768, -32768, -32768, -32768, -32768],
+                       'water_velocity_up': [459, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                             -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                             -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                             -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                             -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                             -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                             -32768],
+                       'error_velocity': [80, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                          -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                          -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                          -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                          -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                          -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+                                          -32768]}
+        # test02 data was extracted using the PD0decoder_v2 MATLAB tool
+        # ensemble 1 of file ADCP_CCE1T_20.000
+        self.test02 = {'ensemble_number': 1, 'heading': 21348, 'pitch': 4216, 'roll': 3980}
 
-        #test03 data was extracted using the PD0decoder_v2 MATLAB tool
-        #ensemble 20 of file ADCP_CCE1T_20.000
-        self.test03 = {}
-        self.test03['ensemble_number'] = 20
-        self.test03['real_time_clock'] = [12, 9, 21, 19, 0, 0, 0]
-        self.test03['heading'] = 538
-        self.test03['pitch'] = 147
-        self.test03['roll'] = 221
-
-        #test04 data was extracted using the PD0decoder_v2 MATLAB tool
-        #ensemble 5 of file ADCP_CCE1T_20.000
-        self.test04 = {}
-        self.test04['ensemble_number'] = 6
-        self.test04['real_time_clock'] = [12, 9, 21, 5, 0, 0, 0]
-        self.test04['heading'] = 20127
-        self.test04['pitch'] = 4218
-        self.test04['roll'] = 3773
-
-        #test05 data was extracted using the PD0decoder_v2 MATLAB tool
-        #ensemble 2 of file ADCP_CCE1T_20.000
-        self.test05 = {}
-        self.test05['ensemble_number'] = 2
-        self.test05['real_time_clock'] = [12, 9, 21, 1, 0, 0, 0]
-        self.test05['heading'] = 28638
-        self.test05['pitch'] = 4192
-        self.test05['roll'] = 4004
-
-    def particle_to_yml(self, particles, filename, mode='w'):
-        """
-        This is added as a testing helper, not actually as part of the parser tests. Since the same particles
-        will be used for the driver test it is helpful to write them to .yml in the same form they need in the
-        results.yml fids here.
-        """
-        # open write append, if you want to start from scratch manually delete this fid
-        fid = open(os.path.join(RESOURCE_PATH, filename), mode)
-
-        fid.write('header:\n')
-        fid.write("    particle_object: 'MULTIPLE'\n")
-        fid.write("    particle_type: 'MULTIPLE'\n")
-        fid.write('data:\n')
-
-        for i in range(0, len(particles)):
-            particle_dict = particles[i].generate_dict()
-
-            fid.write('  - _index: %d\n' % (i+1))
-
-            fid.write('    particle_object: %s\n' % particles[i].__class__.__name__)
-            fid.write('    particle_type: %s\n' % particle_dict.get('stream_name'))
-            fid.write('    internal_timestamp: %f\n' % particle_dict.get('internal_timestamp'))
-
-            for val in particle_dict.get('values'):
-                if isinstance(val.get('value'), float):
-                    fid.write('    %s: %16.16f\n' % (val.get('value_id'), val.get('value')))
-                else:
-                    fid.write('    %s: %s\n' % (val.get('value_id'), val.get('value')))
-        fid.close()
-
-    def get_dict_from_yml(self, filename):
-        """
-        This utility routine loads the contents of a yml file
-        into a dictionary
-        """
-
-        fid = open(os.path.join(RESOURCE_PATH, filename), 'r')
-        result = yaml.load(fid)
-        fid.close()
-
-        return result
-
-    def create_yml(self):
-        """
-        This utility creates a yml file
-        """
-
-        #ADCP_data_20130702.PD0 has one record in it
-        fid = open(os.path.join(RESOURCE_PATH, 'ADCP_CCE1T_21_40.000'), 'rb')
-
-        self.stream_handle = fid
-        self.parser = AdcpPd0Parser(self.config, self.start_state, self.stream_handle,
-                                    self.state_callback, self.pub_callback, self.exception_callback)
-
-        particles = self.parser.get_records(20)
-
-        self.particle_to_yml(particles, 'ADCP_CCE1T_21_40.yml')
-        fid.close()
-
-    def trim_file(self):
-        """
-        This utility routine can be used to trim large PD0 files down
-        to a more manageable size.  It uses the sieve in the parser to
-        create a copy of the file with a specified number of records
-        """
-
-        #define these values as needed
-
-        input_file = 'ADCP_CCE1T.000'
-        output_file = 'ADCP_CCE1T_21_40.000'
-        num_rec = 20
-        first_rec = 21
-        log.info("opening file")
-        infid = open(os.path.join(RESOURCE_PATH, input_file), 'rb')
-        in_buffer = infid.read()
-        log.info("file read")
-        stream_handle = infid
-        #parser needs a stream handle even though it won't use it
-        parser = AdcpPd0Parser(self.config, self.start_state, stream_handle,
-                               self.state_callback, self.pub_callback, self.exception_callback)
-        log.info("parser created, calling sieve")
-        indices = parser.sieve_function(in_buffer)
-        #get the start and ends of all the records
-        log.info("sieve returned %d indeces", len(indices))
-        if len(indices) < first_rec + num_rec:
-            log.info('trim_file: not enough records in file no output created')
-            return
-
-        first_byte = indices[first_rec-1][0]
-        last_byte = indices[first_rec-1 + num_rec-1][1]
-        log.info('first byte is %d last_byte is %d', first_byte, last_byte)
-
-        outfid = open(os.path.join(RESOURCE_PATH, output_file), 'wb')
-        outfid.write(in_buffer[first_byte:last_byte])
-        outfid.close()
-        infid.close()
+        # test03 data was extracted using the PD0decoder_v2 MATLAB tool
+        # ensemble 20 of file ADCP_CCE1T_20.000
+        self.test03 = {'ensemble_number': 20, 'heading': 538, 'pitch': 147, 'roll': 221}
 
     def assert_result(self, test, particle):
         """
@@ -244,7 +110,7 @@ class AdcpsJlnParserUnitTestCase(ParserUnitTestCase):
 
         particle_dict = particle.generate_dict()
 
-        #for efficiency turn the particle values list of dictionaries into a dictionary
+        # for efficiency turn the particle values list of dictionaries into a dictionary
         particle_values = {}
         for param in particle_dict.get('values'):
             particle_values[param['value_id']] = param['value']
@@ -253,20 +119,19 @@ class AdcpsJlnParserUnitTestCase(ParserUnitTestCase):
         for key in test:
             test_data = test[key]
 
-            #get the correct data to compare to the test
+            # get the correct data to compare to the test
             if key == 'internal_timestamp':
                 particle_data = particle.get_value('internal_timestamp')
-                #the timestamp is in the header part of the particle
+                # the timestamp is in the header part of the particle
             elif key == 'position':
                 particle_data = self.state_callback_value['position']
-                #position corresponds to the position in the file
+                # position corresponds to the position in the file
             else:
                 particle_data = particle_values.get(key)
-                #others are all part of the parsed values part of the particle
+                # others are all part of the parsed values part of the particle
 
             if particle_data is None:
-                #generally OK to ignore index keys in the test data, verify others
-
+                # generally OK to ignore index keys in the test data, verify others
                 log.warning("\nWarning: assert_result ignoring test key %s, does not exist in particle", key)
             else:
                 if isinstance(test_data, float):
@@ -275,7 +140,7 @@ class AdcpsJlnParserUnitTestCase(ParserUnitTestCase):
                     self.assertTrue(compare)
                 else:
                     # otherwise they are all ints and should be exactly equal
-                    self.assertEqual(test_data, particle_data)
+                    self.assertEqual(test_data, particle_data, msg=particle_values)
 
     def test_simple(self):
         """
@@ -286,23 +151,18 @@ class AdcpsJlnParserUnitTestCase(ParserUnitTestCase):
         and are the entire parsed particle is represented in ADCP_data_20130702.yml
         """
 
-        #ADCP_data_20130702.PD0 has one record in it
-        fid = open(os.path.join(RESOURCE_PATH, 'ADCP_data_20130702.000'), 'rb')
+        # ADCP_data_20130702.PD0 has one record in it
+        with open(os.path.join(RESOURCE_PATH, 'ADCP_data_20130702.000'), 'rb') as stream_handle:
 
-        self.stream_handle = fid
-        self.parser = AdcpPd0Parser(self.config, self.start_state, self.stream_handle,
-                                    self.state_callback, self.pub_callback, self.exception_callback)
+            parser = AdcpPd0Parser(self.config, stream_handle, self.exception_callback)
 
-        particles = self.parser.get_records(1)
+            particles = parser.get_records(4)
 
-        #this simple test shows the 2 ways to verify results
-        self.assert_result(self.test01, particles[0])
+            # this simple test shows the 2 ways to verify results
+            self.assert_result(self.test01, particles[0])
 
-        test_data = self.get_dict_from_yml('ADCP_data_20130702.yml')
-        self.assert_result(test_data['data'][0], particles[0])
-
-        #close the file
-        fid.close()
+            self.assert_particles(particles, 'ADCP_data_20130702.yml', RESOURCE_PATH)
+            self.assertEqual(self.exception_callback_value, [])
 
     def test_get_many(self):
         """
@@ -310,90 +170,258 @@ class AdcpsJlnParserUnitTestCase(ParserUnitTestCase):
         Assert that the results are those we expected.
         """
 
-        #ADCP_CCE1T_20.000 has 20 records in it
-        fid = open(os.path.join(RESOURCE_PATH, 'ADCP_CCE1T_20.000'), 'rb')
+        # ADCP_CCE1T_20.000 has 20 records in it
+        with open(os.path.join(RESOURCE_PATH, 'ADCP_CCE1T_20.000'), 'rb') as stream_handle:
 
-        self.stream_handle = fid
-        self.parser = AdcpPd0Parser(self.config, self.start_state, self.stream_handle,
-                                    self.state_callback, self.pub_callback, self.exception_callback)
+            parser = AdcpPd0Parser(self.config, stream_handle, self.exception_callback)
 
-        particles = self.parser.get_records(20)
-        log.info('got back %d records', len(particles))
+            particles = parser.get_records(50)
 
-        self.assert_result(self.test02, particles[0])
-        self.assert_result(self.test03, particles[19])
-
-        fid.close()
-
-    def test_mid_state_start(self):
-        """
-        Test starting the parser in a state in the middle of processing
-        """
-        #ADCP_CCE1T_20.000 has 20 records in it
-        fid = open(os.path.join(RESOURCE_PATH, 'ADCP_CCE1T_20.000'), 'rb')
-
-        self.stream_handle = fid
-
-        new_state = {StateKey.POSITION: 6000}
-        #ensembles in this file are 1254 bytes long
-        #the first record found should be number 6 at byte 6270
-
-        self.parser = AdcpPd0Parser(self.config, new_state, self.stream_handle,
-                                    self.state_callback, self.pub_callback, self.exception_callback)
-
-        particles = self.parser.get_records(5)
-
-        self.assert_result(self.test04, particles[0])
-
-        fid.close()
-
-    def test_set_state(self):
-        """
-        Test changing to a new state after initializing the parser and
-        reading data, as if new data has been found and the state has
-        changed
-        """
-        #ADCP_CCE1T_20.000 has 20 records in it
-        fid = open(os.path.join(RESOURCE_PATH, 'ADCP_CCE1T_20.000'), 'rb')
-
-        self.stream_handle = fid
-
-        new_state = {StateKey.POSITION: 100}
-        #ensembles in this file are 1254 bytes long
-        #the first record found should be number 2 at byte 1254
-
-        self.parser = AdcpPd0Parser(self.config, new_state, self.stream_handle,
-                                    self.state_callback, self.pub_callback, self.exception_callback)
-
-        particles = self.parser.get_records(1)
-        #just get 1 record
-        self.assert_result(self.test05, particles[0])
-
-        new_state = {StateKey.POSITION: 6000}
-        #ensembles in this file are 1254 bytes long
-        #the first record found should be number 6 at byte 6270
-
-        self.parser = AdcpPd0Parser(self.config, new_state, self.stream_handle,
-                                    self.state_callback, self.pub_callback, self.exception_callback)
-
-        particles = self.parser.get_records(1)
-        #just get 1 record
-        self.assert_result(self.test04, particles[0])
-
-        fid.close()
+            self.assert_result(self.test02, particles[0])
+            self.assert_result(self.test03, particles[43])
 
     def test_bad_data(self):
         """
         Ensure that bad data is skipped when it exists.
         """
-        #ADCP_data_Corrupted.PD0 has one bad record followed by one good in it
-        fid = open(os.path.join(RESOURCE_PATH, 'ADCP_data_Corrupted.000'), 'rb')
+        # ADCP_data_Corrupted.PD0 has one bad record followed by one good in it
+        with open(os.path.join(RESOURCE_PATH, 'ADCP_data_Corrupted.000'), 'rb') as stream_handle:
 
-        self.stream_handle = fid
-        self.parser = AdcpPd0Parser(self.config, self.start_state, self.stream_handle,
-                                    self.state_callback, self.pub_callback, self.exception_callback)
+            parser = AdcpPd0Parser(self.config, stream_handle, self.exception_callback)
 
-        particles = self.parser.get_records(1)
-        self.assert_result(self.test01, particles[0])
+            particles = parser.get_records(1)
+            self.assert_result(self.test01, particles[0])
 
-        fid.close()
+    def test_long_stream(self):
+        """
+        Verify an entire file against a yaml result file.
+        """
+        with open(os.path.join(RESOURCE_PATH, 'ADCP_CCE1T_20.000'), 'rb') as stream_handle:
+
+            parser = AdcpPd0Parser(self.config, stream_handle, self.exception_callback)
+
+            particles = parser.get_records(47)
+
+            self.assert_particles(particles, 'ADCP_CCE1T_20.yml', RESOURCE_PATH)
+            self.assertEqual(self.exception_callback_value, [])
+
+
+def convert_yml(input_file):
+    earth = [
+        'num_cells',
+        'cell_length',
+        'bin_1_distance',
+        'ensemble_number',
+        'heading',
+        'pitch',
+        'roll',
+        'salinity',
+        'temperature',
+        'transducer_depth',
+        'pressure',
+        'sysconfig_vertical_orientation',
+        'water_velocity_east',
+        'water_velocity_north',
+        'water_velocity_up',
+        'error_velocity',
+        'water_velocity_forward',
+        'water_velocity_starboard',
+        'water_velocity_vertical',
+        'correlation_magnitude_beam1',
+        'correlation_magnitude_beam2',
+        'correlation_magnitude_beam3',
+        'correlation_magnitude_beam4',
+        'echo_intensity_beam1',
+        'echo_intensity_beam2',
+        'echo_intensity_beam3',
+        'echo_intensity_beam4',
+        'percent_good_3beam',
+        'percent_transforms_reject',
+        'percent_bad_beams',
+        'percent_good_4beam',
+    ]
+
+    config = [
+        'firmware_version',
+        'firmware_revision',
+        'data_flag',
+        'lag_length',
+        'num_beams',
+        'num_cells',
+        'pings_per_ensemble',
+        'cell_length',
+        'blank_after_transmit',
+        'signal_processing_mode',
+        'low_corr_threshold',
+        'num_code_repetitions',
+        'percent_good_min',
+        'error_vel_threshold',
+        'time_per_ping_minutes',
+        'time_per_ping_seconds',
+        'heading_alignment',
+        'heading_bias',
+        'reference_layer_start',
+        'reference_layer_stop',
+        'false_target_threshold',
+        'low_latency_trigger',
+        'transmit_lag_distance',
+        'cpu_board_serial_number',
+        'system_bandwidth',
+        'system_power',
+        'serial_number',
+        'beam_angle',
+        'sysconfig_frequency',
+        'sysconfig_beam_pattern',
+        'sysconfig_sensor_config',
+        'sysconfig_head_attached',
+        'sysconfig_vertical_orientation',
+        'sysconfig_beam_angle',
+        'sysconfig_beam_config',
+        'coord_transform_type',
+        'coord_transform_tilts',
+        'coord_transform_beams',
+        'coord_transform_mapping',
+        'sensor_source_speed',
+        'sensor_source_depth',
+        'sensor_source_heading',
+        'sensor_source_pitch',
+        'sensor_source_roll',
+        'sensor_source_conductivity',
+        'sensor_source_temperature',
+        'sensor_source_temperature_eu',
+        'sensor_available_speed',
+        'sensor_available_depth',
+        'sensor_available_heading',
+        'sensor_available_pitch',
+        'sensor_available_roll',
+        'sensor_available_conductivity',
+        'sensor_available_temperature',
+        'sensor_available_temperature_eu',
+    ]
+
+    engineering = [
+        'transmit_pulse_length',
+        'speed_of_sound',
+        'mpt_minutes',
+        'mpt_seconds',
+        'heading_stdev',
+        'pitch_stdev',
+        'roll_stdev',
+        'pressure_variance',
+        'adc_ambient_temp',
+        'adc_attitude',
+        'adc_attitude_temp',
+        'adc_contamination_sensor',
+        'adc_pressure_minus',
+        'adc_pressure_plus',
+        'adc_transmit_current',
+        'adc_transmit_voltage',
+    ]
+
+    stream_map = {
+        'adcp_velocity_earth': ('VelocityEarth', earth),
+        'adcp_config': ('AdcpsConfig', config),
+        'adcp_engineering': ('AdcpsEngineering', engineering),
+    }
+
+    streams = [
+        'adcp_velocity_earth',
+        'adcp_config',
+        'adcp_engineering',
+    ]
+
+    always = streams[:1]
+
+    last = {}
+
+    def create_particle(record, index, stream):
+        klass, fields = stream_map.get(stream)
+        particle = {field: record.get(field) for field in fields if field in record}
+        particle['_index'] = index
+        particle['particle_object'] = klass
+        particle['particle_type'] = stream
+        particle['internal_timestamp'] = record['internal_timestamp']
+
+        if 'time_per_ping_seconds' in fields:
+            seconds = particle['time_per_ping_seconds']
+            int_seconds = int(seconds)
+            hundredths = int(100 * (seconds - int_seconds))
+            particle['time_per_ping_hundredths'] = hundredths
+            particle['time_per_ping_seconds'] = int_seconds
+
+        if 'mpt_seconds' in fields:
+            seconds = particle['mpt_seconds']
+            int_seconds = int(seconds)
+            hundredths = int(100 * (seconds - int_seconds))
+            particle['mpt_hundredths'] = hundredths
+            particle['mpt_seconds'] = int_seconds
+
+        if stream == 'adcp_engineering':
+            bit_result = (
+                record.get('bit_result_demod_1', 0) * 0b10000 +
+                record.get('bit_result_demod_0', 0) * 0b1000 +
+                record.get('bit_result_timing', 0) * 0b10
+            )
+            particle['bit_result'] = bit_result
+
+            esw = (
+                record.get('bus_error_exception', 0) +
+                record.get('address_error_exception', 0) * 0b10 +
+                record.get('illegal_instruction_exception', 0) * 0b100 +
+                record.get('zero_divide_instruction', 0) * 0b1000 +
+                record.get('emulator_exception', 0) * 0b10000 +
+                record.get('unassigned_exception', 0) * 0b100000 +
+                record.get('watchdog_restart_occurred', 0) * 0b1000000 +
+                record.get('battery_saver_power', 0) * 0b10000000 +
+                record.get('pinging', 0) * (0b1 << 8) +
+                record.get('cold_wakeup_occurred', 0) * (0b1000000 << 8) +
+                record.get('unknown_wakeup_occurred', 0) * (0b10000000 << 8) +
+                record.get('clock_read_error', 0) * (0b1 << 16) +
+                record.get('unexpected_alarm', 0) * (0b10 << 16) +
+                record.get('clock_jump_forward', 0) * (0b100 << 16) +
+                record.get('clock_jump_backward', 0) * (0b1000 << 16) +
+                record.get('power_fail', 0) * (0b1000 << 24) +
+                record.get('spurious_dsp_interrupt', 0) * (0b10000 << 24) +
+                record.get('spurious_uart_interrupt', 0) * (0b100000 << 24) +
+                record.get('spurious_clock_interrupt', 0) * (0b1000000 << 24) +
+                record.get('level_7_interrupt', 0) * (0b10000000 << 24)
+            )
+            particle['error_status_word'] = esw
+
+        return particle
+
+    def changed(particle):
+        particle = copy.deepcopy(particle)
+        stream = particle.pop('particle_type')
+        particle.pop('particle_object')
+        particle.pop('_index')
+        particle.pop('internal_timestamp')
+        last_values = last.get(stream)
+        if last_values == particle:
+            return False
+
+        last[stream] = particle
+        return True
+
+    out_records = []
+    records = yaml.load(open(input_file))
+    index = 1
+    for record in records['data']:
+        for stream in streams:
+            particle = create_particle(record, index, stream)
+            if stream in always or changed(particle):
+                out_records.append(particle)
+                index += 1
+
+    records['data'] = out_records
+    yaml.dump(records, open(input_file, 'w'))
+
+
+def convert_all():
+    yml_files = [
+        'ADCP_data_20130702.yml',
+        'ADCP_CCE1T_20.yml',
+    ]
+
+    for f in yml_files:
+        convert_yml(os.path.join(RESOURCE_PATH, f))

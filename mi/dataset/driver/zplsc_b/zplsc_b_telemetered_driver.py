@@ -14,13 +14,16 @@ Initial Release
 from mi.dataset.dataset_parser import DataSetDriverConfigKeys
 from mi.dataset.dataset_driver import SimpleDatasetDriver
 from mi.dataset.parser.zplsc_b import ZplscBParser
+from mi.core.versioning import version
 
 
+@version("15.6.0")
 def parse(basePythonCodePath, sourceFilePath, outputFilePath, particleDataHdlrObj):
     """
     This is the method called by Uframe
     :param basePythonCodePath This is the file system location of mi-dataset
     :param sourceFilePath This is the full path and filename of the file to be parsed
+    :param outputFilePath This is the full path of the file to be output
     :param particleDataHdlrObj Java Object to consume the output of the parser
     :return particleDataHdlrObj
     """

@@ -9,77 +9,29 @@ Release notes:
 
 initial release
 """
+import datetime as dt
+import struct
+
+from mi.core.common import BaseEnum
+from mi.core.exceptions import RecoverableSampleException
+from mi.core.exceptions import UnexpectedDataException
+from mi.core.instrument.data_particle import DataParticle, DataParticleKey
+from mi.core.log import get_logger
+from mi.dataset.dataset_parser import SimpleParser, DataSetDriverConfigKeys
+from mi.dataset.parser.pd0_parser import AdcpPd0Record, PD0ParsingException
 
 __author__ = 'Jeff Roy'
 __license__ = 'Apache 2.0'
 
-import copy
-import datetime as dt
-import ntplib
-import re
-import struct
-
-from calendar import timegm
-
-from mi.core.log import get_logger
 
 log = get_logger()
-from mi.core.common import BaseEnum
-from mi.core.instrument.data_particle import \
-    DataParticle, DataParticleKey, DataParticleValue
-from mi.core.exceptions import SampleException, \
-    DatasetParserException, UnexpectedDataException
-from mi.dataset.dataset_parser import BufferLoadingParser
-
 ADCPS_PD0_HEADER_REGEX = b'\x7f\x7f'  # header bytes in PD0 files flagged by 7F7F
 
-ADCPS_PD0_HEADER_MATCHER = re.compile(ADCPS_PD0_HEADER_REGEX)
 
-#define the lengths of ensemble parts
-FIXED_HEADER_BYTES = 6
-NUM_BYTES_BYTES = 2  # The number of bytes for the number of bytes field.
-OFFSET_BYTES = 2
-ID_BYTES = 2
-ADCPS_FIXED_LEADER_BYTES = 59
-ADCPA_FIXED_LEADER_BYTES = 58
-ADCPS_VARIABLE_LEADER_BYTES = 65
-ADCPA_VARIABLE_LEADER_BYTES = 60
-VELOCITY_BYTES_PER_CELL = 8
-CORRELATION_BYTES_PER_CELL = 4
-ECHO_INTENSITY_BYTES_PER_CELL = 4
-PERCENT_GOOD_BYTES_PER_CELL = 4
-ADCPS_BOTTOM_TRACK_BYTES = 85
-ADCPA_BOTTOM_TRACK_BYTES = 81
-CHECKSUM_BYTES = 2
-
-#used to verify 16 bit checksum
-CHECKSUM_MODULO = 65535
-
-#IDs of the different parts of the ensemble.
-FIXED_LEADER_ID = 0
-VARIABLE_LEADER_ID = 128
-VELOCITY_ID = 256
-CORRELATION_ID = 512
-ECHO_INTENSITY_ID = 768
-PERCENT_GOOD_ID = 1024
-BOTTOM_TRACK_ID = 1536
-
-
-class AdcpPd0ParserDataParticleKey(BaseEnum):
+class AdcpPd0ParsedKey(BaseEnum):
     """
     Data particles for the Teledyne ADCPs Workhorse PD0 formatted data files
     """
-
-    # # Header Data
-    # HEADER_ID = 'header_id'
-    # DATA_SOURCE_ID = 'data_source_id'
-    # NUM_BYTES = 'num_bytes'
-    # NUM_DATA_TYPES = 'num_data_types'
-    # OFFSET_DATA_TYPES = 'offset_data_types'
-    #
-    # # Fixed Leader Data
-    # FIXED_LEADER_ID = 'fixed_leader_id'
-
     FIRMWARE_VERSION = 'firmware_version'
     FIRMWARE_REVISION = 'firmware_revision'
     SYSCONFIG_FREQUENCY = 'sysconfig_frequency'
@@ -103,6 +55,7 @@ class AdcpPd0ParserDataParticleKey(BaseEnum):
     ERROR_VEL_THRESHOLD = 'error_vel_threshold'
     TIME_PER_PING_MINUTES = 'time_per_ping_minutes'
     TIME_PER_PING_SECONDS = 'time_per_ping_seconds'
+    TIME_PER_PING_HUNDREDTHS = 'time_per_ping_hundredths'
     COORD_TRANSFORM_TYPE = 'coord_transform_type'
     COORD_TRANSFORM_TILTS = 'coord_transform_tilts'
     COORD_TRANSFORM_BEAMS = 'coord_transform_beams'
@@ -132,23 +85,14 @@ class AdcpPd0ParserDataParticleKey(BaseEnum):
     FALSE_TARGET_THRESHOLD = 'false_target_threshold'
     LOW_LATENCY_TRIGGER = 'low_latency_trigger'
     TRANSMIT_LAG_DISTANCE = 'transmit_lag_distance'
-    CPU_SERIAL_NUM = 'cpu_board_serial_number'
-    SYSTEM_BANDWIDTH = 'system_bandwidth'
-    SYSTEM_POWER = 'system_power'
+    CPU_SERIAL_NUM = 'cpu_board_serial_number'  # ADCPS Only
+    SYSTEM_BANDWIDTH = 'system_bandwidth'  # ADCPS & ADCPA (glider) Only
+    SYSTEM_POWER = 'system_power'  # ADCPS Only
     SERIAL_NUMBER = 'serial_number'
-    BEAM_ANGLE = 'beam_angle'
+    BEAM_ANGLE = 'beam_angle'  # ADCPS & ADCPA AUV Only
 
     # Variable Leader Data
-    #VARIABLE_LEADER_ID = 'variable_leader_id'
     ENSEMBLE_NUMBER = 'ensemble_number'
-    REAL_TIME_CLOCK = 'real_time_clock'
-    ENSEMBLE_START_TIME = 'ensemble_start_time'
-    ENSEMBLE_NUMBER_INCREMENT = 'ensemble_number_increment'
-    BIT_RESULT_DEMOD_1 = 'bit_result_demod_1'  # ADCPS Only
-    BIT_RESULT_DEMOD_0 = 'bit_result_demod_0'  # ADCPS Only
-    BIT_RESULT_TIMING = 'bit_result_timing'  # ADCPS Only
-    BIT_ERROR_NUMBER = 'bit_error_number'  # ADCPA Only
-    BIT_ERROR_COUNT = 'bit_error_count'    # ADCPA Only
     SPEED_OF_SOUND = 'speed_of_sound'
     TRANSDUCER_DEPTH = 'transducer_depth'
     HEADING = 'heading'
@@ -158,66 +102,45 @@ class AdcpPd0ParserDataParticleKey(BaseEnum):
     TEMPERATURE = 'temperature'
     MPT_MINUTES = 'mpt_minutes'
     MPT_SECONDS = 'mpt_seconds'
+    MPT_HUNDREDTHS = 'mpt_hundredths'
     HEADING_STDEV = 'heading_stdev'
     PITCH_STDEV = 'pitch_stdev'
     ROLL_STDEV = 'roll_stdev'
-    ADC_TRANSMIT_CURRENT = 'adc_transmit_current'  # ADCPS Only
-    ADC_TRANSMIT_VOLTAGE = 'adc_transmit_voltage'  # ADCPS Only
-    ADC_AMBIENT_TEMP = 'adc_ambient_temp'  # ADCPS Only
-    ADC_PRESSURE_PLUS = 'adc_pressure_plus'  # ADCPS Only
-    ADC_PRESSURE_MINUS = 'adc_pressure_minus'  # ADCPS Only
-    ADC_ATTITUDE_TEMP = 'adc_attitude_temp'  # ADCPS Only
-    ADC_ATTITUDE = 'adc_attitude'  # ADCPS Only
-    ADC_CONTAMINATION_SENSOR = 'adc_contamination_sensor'  # ADCPS Only
-    BUS_ERROR_EXCEPTION = 'bus_error_exception'  # ADCPS Only
-    ADDRESS_ERROR_EXCEPTION = 'address_error_exception'  # ADCPS Only
-    ILLEGAL_INSTRUCTION_EXCEPTION = 'illegal_instruction_exception'  # ADCPS Only
-    ZERO_DIVIDE_INSTRUCTION = 'zero_divide_instruction'  # ADCPS Only
-    EMULATOR_EXCEPTION = 'emulator_exception'  # ADCPS Only
-    UNASSIGNED_EXCEPTION = 'unassigned_exception'  # ADCPS Only
-    WATCHDOG_RESTART_OCCURRED = 'watchdog_restart_occurred'  # ADCPS Only
-    BATTERY_SAVER_POWER = 'battery_saver_power'  # ADCPS Only
-    PINGING = 'pinging'  # ADCPS Only
-    COLD_WAKEUP_OCCURRED = 'cold_wakeup_occurred'  # ADCPS Only
-    UNKNOWN_WAKEUP_OCCURRED = 'unknown_wakeup_occurred'  # ADCPS Only
-    CLOCK_READ_ERROR = 'clock_read_error'  # ADCPS Only
-    UNEXPECTED_ALARM = 'unexpected_alarm'  # ADCPS Only
-    CLOCK_JUMP_FORWARD = 'clock_jump_forward'  # ADCPS Only
-    CLOCK_JUMP_BACKWARD = 'clock_jump_backward'  # ADCPS Only
-    POWER_FAIL = 'power_fail'  # ADCPS Only
-    SPURIOUS_DSP_INTERRUPT = 'spurious_dsp_interrupt'  # ADCPS Only
-    SPURIOUS_UART_INTERRUPT = 'spurious_uart_interrupt'  # ADCPS Only
-    SPURIOUS_CLOCK_INTERRUPT = 'spurious_clock_interrupt'  # ADCPS Only
-    LEVEL_7_INTERRUPT = 'level_7_interrupt'  # ADCPS Only
-    PRESSURE = 'pressure'
-    PRESSURE_VARIANCE = 'pressure_variance'
-
-    REAL_TIME_CLOCK2 = 'real_time_clock_2'  # ADCPS Only
-    ENSEMBLE_START_TIME2 = 'ensemble_start_time_2'  # ADCPS Only
+    ADC_TRANSMIT_CURRENT = 'adc_transmit_current'  # ADCPS & ADCPA AUV Only
+    ADC_TRANSMIT_VOLTAGE = 'adc_transmit_voltage'  # ADCPS & ADCPA AUV Only
+    ADC_AMBIENT_TEMP = 'adc_ambient_temp'  # ADCPS & ADCPA AUV Only
+    ADC_PRESSURE_PLUS = 'adc_pressure_plus'  # ADCPS & ADCPA AUV Only
+    ADC_PRESSURE_MINUS = 'adc_pressure_minus'  # ADCPS & ADCPA AUV Only
+    ADC_ATTITUDE_TEMP = 'adc_attitude_temp'  # ADCPS & ADCPA AUV Only
+    ADC_ATTITUDE = 'adc_attitude'  # ADCPS & ADCPA AUV Only
+    ADC_CONTAMINATION_SENSOR = 'adc_contamination_sensor'  # ADCPS & ADCPA AUV Only
+    BIT_RESULT = 'bit_result'
+    ERROR_STATUS_WORD = 'error_status_word'
+    PRESSURE = 'pressure'  # ADCPS and ADCPA (glider) Only
+    PRESSURE_VARIANCE = 'pressure_variance'  # ADCPS and ADCPA (glider) Only
 
     # Velocity Data
-    #VELOCITY_DATA_ID = 'velocity_data_id'
-    WATER_VELOCITY_EAST = 'water_velocity_east'
-    WATER_VELOCITY_NORTH = 'water_velocity_north'
-    WATER_VELOCITY_UP = 'water_velocity_up'
+    WATER_VELOCITY_EAST = 'water_velocity_east'  # ADCPS and ADCPA (glider) Only
+    WATER_VELOCITY_NORTH = 'water_velocity_north'  # ADCPS and ADCPA (glider) Only
+    WATER_VELOCITY_UP = 'water_velocity_up'  # ADCPS and ADCPA (glider) Only
+    WATER_VELOCITY_FORWARD = 'water_velocity_forward'  # ADCPA AUV Only
+    WATER_VELOCITY_STARBOARD = 'water_velocity_starboard'  # ADCPA AUV Only
+    WATER_VELOCITY_VERTICAL = 'water_velocity_vertical'  # ADCPA AUV Only
     ERROR_VELOCITY = 'error_velocity'
 
     # Correlation Magnitude Data
-    #CORRELATION_MAGNITUDE_ID = 'correlation_magnitude_id'
     CORRELATION_MAGNITUDE_BEAM1 = 'correlation_magnitude_beam1'
     CORRELATION_MAGNITUDE_BEAM2 = 'correlation_magnitude_beam2'
     CORRELATION_MAGNITUDE_BEAM3 = 'correlation_magnitude_beam3'
     CORRELATION_MAGNITUDE_BEAM4 = 'correlation_magnitude_beam4'
 
     # Echo Intensity Data
-    #ECHO_INTENSITY_ID = 'echo_intensity_id'
     ECHO_INTENSITY_BEAM1 = 'echo_intensity_beam1'
     ECHO_INTENSITY_BEAM2 = 'echo_intensity_beam2'
     ECHO_INTENSITY_BEAM3 = 'echo_intensity_beam3'
     ECHO_INTENSITY_BEAM4 = 'echo_intensity_beam4'
 
     # Percent Good Data
-    #PERCENT_GOOD_ID = 'percent_good_id'
     PERCENT_GOOD_3BEAM = 'percent_good_3beam'
     PERCENT_TRANSFORMS_REJECT = 'percent_transforms_reject'
     PERCENT_BAD_BEAMS = 'percent_bad_beams'
@@ -225,7 +148,6 @@ class AdcpPd0ParserDataParticleKey(BaseEnum):
 
     # Bottom Track Data (only produced for ADCPA
     # when the glider is in less than 65 m of water)
-    #BOTTOM_TRACK_ID = 'bottom_track_id'
     BT_PINGS_PER_ENSEMBLE = 'bt_pings_per_ensemble'
     BT_DELAY_BEFORE_REACQUIRE = 'bt_delay_before_reacquire'
     BT_CORR_MAGNITUDE_MIN = 'bt_corr_magnitude_min'
@@ -239,9 +161,12 @@ class AdcpPd0ParserDataParticleKey(BaseEnum):
     BT_BEAM3_RANGE = 'bt_beam3_range'
     BT_BEAM4_RANGE = 'bt_beam4_range'
 
-    BT_EASTWARD_VELOCITY = 'bt_eastward_velocity'
-    BT_NORTHWARD_VELOCITY = 'bt_northward_velocity'
-    BT_UPWARD_VELOCITY = 'bt_upward_velocity'
+    BT_EASTWARD_VELOCITY = 'bt_eastward_velocity'  # ADCPS and ADCPA (glider) Only
+    BT_NORTHWARD_VELOCITY = 'bt_northward_velocity'  # ADCPS and ADCPA (glider) Only
+    BT_UPWARD_VELOCITY = 'bt_upward_velocity'  # ADCPS and ADCPA (glider) Only
+    BT_FORWARD_VELOCITY = 'bt_forward_velocity'  # ADCPA AUV Only
+    BT_STARBOARD_VELOCITY = 'bt_starboard_velocity'  # ADCPA AUV Only
+    BT_VERTICAL_VELOCITY = 'bt_vertical_velocity'  # ADCPA AUV Only
     BT_ERROR_VELOCITY = 'bt_error_velocity'
     BT_BEAM1_CORRELATION = 'bt_beam1_correlation'
     BT_BEAM2_CORRELATION = 'bt_beam2_correlation'
@@ -258,9 +183,12 @@ class AdcpPd0ParserDataParticleKey(BaseEnum):
     BT_REF_LAYER_MIN = 'bt_ref_layer_min'
     BT_REF_LAYER_NEAR = 'bt_ref_layer_near'
     BT_REF_LAYER_FAR = 'bt_ref_layer_far'
-    BT_EASTWARD_REF_LAYER_VELOCITY = 'bt_eastward_ref_layer_velocity'
-    BT_NORTHWARD_REF_LAYER_VELOCITY = 'bt_northward_ref_layer_velocity'
-    BT_UPWARD_REF_LAYER_VELOCITY = 'bt_upward_ref_layer_velocity'
+    BT_EASTWARD_REF_LAYER_VELOCITY = 'bt_eastward_ref_layer_velocity'  # ADCPS and ADCPA (glider) Only
+    BT_NORTHWARD_REF_LAYER_VELOCITY = 'bt_northward_ref_layer_velocity'  # ADCPS and ADCPA (glider) Only
+    BT_UPWARD_REF_LAYER_VELOCITY = 'bt_upward_ref_layer_velocity'  # ADCPS and ADCPA (glider) Only
+    BT_FORWARD_REF_LAYER_VELOCITY = 'bt_forward_ref_layer_velocity'  # ADCPA AUV Only
+    BT_STARBOARD_REF_LAYER_VELOCITY = 'bt_starboard_ref_layer_velocity'  # ADCPA AUV Only
+    BT_VERTICAL_REF_LAYER_VELOCITY = 'bt_vertical_ref_layer_velocity'  # ADCPA AUV Only
     BT_ERROR_REF_LAYER_VELOCITY = 'bt_error_ref_layer_velocity'
     BT_BEAM1_REF_CORRELATION = 'bt_beam1_ref_correlation'
     BT_BEAM2_REF_CORRELATION = 'bt_beam2_ref_correlation'
@@ -281,960 +209,516 @@ class AdcpPd0ParserDataParticleKey(BaseEnum):
     BT_BEAM4_RSSI_AMPLITUDE = 'bt_beam4_rssi_amplitude'
     BT_GAIN = 'bt_gain'
 
-    # Ensemble checksum
-    #CHECKSUM = 'checksum'
 
-
-class StateKey(BaseEnum):
-    POSITION = 'position'  # number of bytes read
-
-
-class AdcpFileType(BaseEnum):
-    #enumeration of the different PD0 file formats
-    ADCPA_FILE = 'adcpa_file'  # ADCPA PD0 files are used by the ExplorerDVL instruments
-    ADCPS_File = 'adcps_file'  # ADCPS(T) PD0 files are used by the Workhorse LongRanger Monitor
-
-
-class AdcpPd0DataParticle(DataParticle):
+class AdcpDataParticleType(BaseEnum):
     """
-    Intermediate particle class to handle particle streams from PD0 files
-    constructor must be passed a valid file_type from the enumeration AdcpFileType
-    All other constructor parameters handled by base class
+    Stream types of data particles
     """
+    VELOCITY_EARTH = 'adcp_velocity_earth'
+    VELOCITY_INST = 'adcp_velocity_inst'
+    VELOCITY_GLIDER = 'adcp_velocity_glider'
+    PD0_ENGINEERING = 'adcp_engineering'
+    PD0_CONFIG = 'adcp_config'
+    PD0_ERROR_STATUS = 'adcp_error_status'
+    BOTTOM_TRACK_EARTH = 'adcp_bottom_track_earth'
+    BOTTOM_TRACK_INST = 'adcp_bottom_track_inst'
+    BOTTOM_TRACK_CONFIG = 'adcp_bottom_track_config'
 
-    def __init__(self, raw_data,
-                 port_timestamp=None,
-                 internal_timestamp=None,
-                 preferred_timestamp=DataParticleKey.PORT_TIMESTAMP,
-                 quality_flag=DataParticleValue.OK,
-                 new_sequence=None,
-                 file_type=None):
 
-        self._file_type = file_type
-        # file_type must be set to a value in AdcpFileType
-        # used for conditional decoding of the raw data in
-        # _build_parsed_values
+class Pd0Base(DataParticle):
+    ntp_epoch = dt.datetime(1900, 1, 1)
 
-        super(AdcpPd0DataParticle, self).__init__(raw_data,
-                                                  port_timestamp,
-                                                  internal_timestamp,
-                                                  preferred_timestamp,
-                                                  quality_flag,
-                                                  new_sequence)
+    def __init__(self, *args, **kwargs):
+        if not 'preferred_timestamp' in kwargs:
+            kwargs['preferred_timestamp'] = DataParticleKey.INTERNAL_TIMESTAMP
+        super(Pd0Base, self).__init__(*args, **kwargs)
+        record = self.raw_data
+        dts = dt.datetime(2000 + record.variable_data.rtc_year,
+                          record.variable_data.rtc_month,
+                          record.variable_data.rtc_day,
+                          record.variable_data.rtc_hour,
+                          record.variable_data.rtc_minute,
+                          record.variable_data.rtc_second)
+
+        rtc_time = (dts - self.ntp_epoch).total_seconds() + record.variable_data.rtc_hundredths / 100.0
+        self.set_internal_timestamp(rtc_time)
+
+
+class VelocityBase(Pd0Base):
+    def _build_base_values(self):
+        """
+        Build the BASE values for all ADCP VELOCITY particles
+        """
+        record = self.raw_data
+        ensemble_number = (record.variable_data.ensemble_roll_over << 16) + record.variable_data.ensemble_number
+
+        return [
+            # FIXED LEADER
+            (AdcpPd0ParsedKey.NUM_CELLS, record.fixed_data.number_of_cells),
+            (AdcpPd0ParsedKey.DEPTH_CELL_LENGTH, record.fixed_data.depth_cell_length),
+            (AdcpPd0ParsedKey.BIN_1_DISTANCE, record.fixed_data.bin_1_distance),
+            # VARIABLE LEADER
+            (AdcpPd0ParsedKey.ENSEMBLE_NUMBER, ensemble_number),
+            (AdcpPd0ParsedKey.HEADING, record.variable_data.heading),
+            (AdcpPd0ParsedKey.PITCH, record.variable_data.pitch),
+            (AdcpPd0ParsedKey.ROLL, record.variable_data.roll),
+            (AdcpPd0ParsedKey.SALINITY, record.variable_data.salinity),
+            (AdcpPd0ParsedKey.TEMPERATURE, record.variable_data.temperature),
+            (AdcpPd0ParsedKey.TRANSDUCER_DEPTH, record.variable_data.depth_of_transducer),
+            # SYSCONFIG BITMAP
+            (AdcpPd0ParsedKey.SYSCONFIG_VERTICAL_ORIENTATION, record.sysconfig.beam_facing),
+            # CORRELATION MAGNITUDES
+            (AdcpPd0ParsedKey.CORRELATION_MAGNITUDE_BEAM1, record.correlation_magnitudes.beam1),
+            (AdcpPd0ParsedKey.CORRELATION_MAGNITUDE_BEAM2, record.correlation_magnitudes.beam2),
+            (AdcpPd0ParsedKey.CORRELATION_MAGNITUDE_BEAM3, record.correlation_magnitudes.beam3),
+            (AdcpPd0ParsedKey.CORRELATION_MAGNITUDE_BEAM4, record.correlation_magnitudes.beam4),
+            # ECHO INTENSITIES
+            (AdcpPd0ParsedKey.ECHO_INTENSITY_BEAM1, record.echo_intensity.beam1),
+            (AdcpPd0ParsedKey.ECHO_INTENSITY_BEAM2, record.echo_intensity.beam2),
+            (AdcpPd0ParsedKey.ECHO_INTENSITY_BEAM3, record.echo_intensity.beam3),
+            (AdcpPd0ParsedKey.ECHO_INTENSITY_BEAM4, record.echo_intensity.beam4),
+        ]
+
+
+class VelocityEarth(VelocityBase):
+    _data_particle_type = AdcpDataParticleType.VELOCITY_EARTH
 
     def _build_parsed_values(self):
         """
-        Take something in the data format and turn it into
-        a particle with the appropriate tag.
-        @throws SampleException If there is a problem with sample creation
+        Add the fields specific to EARTH coordinate values
+        """
+        record = self.raw_data
+        fields = self._build_base_values()
+
+        fields.extend([
+            # EARTH VELOCITIES
+            (AdcpPd0ParsedKey.WATER_VELOCITY_EAST, record.velocities.beam1),
+            (AdcpPd0ParsedKey.WATER_VELOCITY_NORTH, record.velocities.beam2),
+            (AdcpPd0ParsedKey.WATER_VELOCITY_UP, record.velocities.beam3),
+            (AdcpPd0ParsedKey.ERROR_VELOCITY, record.velocities.beam4),
+            (AdcpPd0ParsedKey.PERCENT_GOOD_3BEAM, record.percent_good.beam1),
+            (AdcpPd0ParsedKey.PERCENT_TRANSFORMS_REJECT, record.percent_good.beam2),
+            (AdcpPd0ParsedKey.PERCENT_BAD_BEAMS, record.percent_good.beam3),
+            (AdcpPd0ParsedKey.PERCENT_GOOD_4BEAM, record.percent_good.beam4),
+            (AdcpPd0ParsedKey.PRESSURE, record.variable_data.pressure),
+        ])
+
+        return [{DataParticleKey.VALUE_ID: key, DataParticleKey.VALUE: value} for key, value in fields]
+
+
+class VelocityGlider(VelocityEarth):
+    _data_particle_type = AdcpDataParticleType.VELOCITY_GLIDER
+
+
+class VelocityInst(VelocityBase):
+    _data_particle_type = AdcpDataParticleType.VELOCITY_INST
+
+    def _build_parsed_values(self):
+        """
+        Add the fields specific to Instrument coordinate values
+        """
+        record = self.raw_data
+        fields = self._build_base_values()
+
+        fields.extend([
+            # INSTRUMENT VELOCITIES
+            (AdcpPd0ParsedKey.WATER_VELOCITY_FORWARD, record.velocities.beam1),
+            (AdcpPd0ParsedKey.WATER_VELOCITY_STARBOARD, record.velocities.beam2),
+            (AdcpPd0ParsedKey.WATER_VELOCITY_VERTICAL, record.velocities.beam3),
+            (AdcpPd0ParsedKey.ERROR_VELOCITY, record.velocities.beam4),
+            (AdcpPd0ParsedKey.PERCENT_GOOD_3BEAM, record.percent_good.beam1),
+            (AdcpPd0ParsedKey.PERCENT_TRANSFORMS_REJECT, record.percent_good.beam2),
+            (AdcpPd0ParsedKey.PERCENT_BAD_BEAMS, record.percent_good.beam3),
+            (AdcpPd0ParsedKey.PERCENT_GOOD_4BEAM, record.percent_good.beam4)])
+
+        return [{DataParticleKey.VALUE_ID: key, DataParticleKey.VALUE: value} for key, value in fields]
+
+
+class EngineeringBase(Pd0Base):
+    """
+    ADCP PD0 data particle
+    @throw SampleException if when break happens
+    """
+    _data_particle_type = AdcpDataParticleType.PD0_ENGINEERING
+
+    def _build_base_fields(self):
+        """
+        Parse the base portion of the particle
+        """
+        record = self.raw_data
+
+        fields = [
+            # FIXED LEADER
+            (AdcpPd0ParsedKey.TRANSMIT_PULSE_LENGTH, record.fixed_data.transmit_pulse_length),
+            # VARIABLE LEADER
+            (AdcpPd0ParsedKey.SPEED_OF_SOUND, record.variable_data.speed_of_sound),
+            (AdcpPd0ParsedKey.MPT_MINUTES, record.variable_data.mpt_minutes),
+            (AdcpPd0ParsedKey.MPT_SECONDS, record.variable_data.mpt_seconds),
+            (AdcpPd0ParsedKey.MPT_HUNDREDTHS, record.variable_data.mpt_hundredths),
+            (AdcpPd0ParsedKey.HEADING_STDEV, record.variable_data.heading_standard_deviation),
+            (AdcpPd0ParsedKey.PITCH_STDEV, record.variable_data.pitch_standard_deviation),
+            (AdcpPd0ParsedKey.ROLL_STDEV, record.variable_data.roll_standard_deviation),
+            (AdcpPd0ParsedKey.ADC_TRANSMIT_VOLTAGE, record.variable_data.transmit_voltage),
+            (AdcpPd0ParsedKey.BIT_RESULT, record.variable_data.bit_result),
+        ]
+
+        return fields
+
+
+class GliderEngineering(EngineeringBase):
+    """
+    ADCP PD0 data particle
+    @throw SampleException if when break happens
+    """
+    def _build_parsed_values(self):
+        record = self.raw_data
+        fields = self._build_base_fields()
+        fields.extend([
+            (AdcpPd0ParsedKey.PRESSURE_VARIANCE, record.variable_data.pressure_variance)
+        ])
+        return [{DataParticleKey.VALUE_ID: key, DataParticleKey.VALUE: value} for key, value in fields]
+
+
+class AuvEngineering(EngineeringBase):
+    """
+    ADCP PD0 data particle
+    @throw SampleException if when break happens
+    """
+    def _build_parsed_values(self):
+        record = self.raw_data
+        fields = self._build_base_fields()
+        fields.extend([
+            (AdcpPd0ParsedKey.ADC_TRANSMIT_CURRENT, record.variable_data.transmit_current),
+            (AdcpPd0ParsedKey.ADC_AMBIENT_TEMP, record.variable_data.ambient_temperature),
+            (AdcpPd0ParsedKey.ADC_PRESSURE_PLUS, record.variable_data.pressure_positive),
+            (AdcpPd0ParsedKey.ADC_PRESSURE_MINUS, record.variable_data.pressure_negative),
+            (AdcpPd0ParsedKey.ADC_ATTITUDE_TEMP, record.variable_data.attitude_temperature),
+            (AdcpPd0ParsedKey.ADC_ATTITUDE, record.variable_data.attitude),
+            (AdcpPd0ParsedKey.ADC_CONTAMINATION_SENSOR, record.variable_data.contamination_sensor),
+            (AdcpPd0ParsedKey.ERROR_STATUS_WORD, record.variable_data.error_status_word),
+        ])
+        return [{DataParticleKey.VALUE_ID: key, DataParticleKey.VALUE: value} for key, value in fields]
+
+
+class AdcpsEngineering(EngineeringBase):
+    """
+    ADCP PD0 data particle
+    @throw SampleException if when break happens
+    """
+    def _build_parsed_values(self):
+        record = self.raw_data
+        fields = self._build_base_fields()
+        fields.extend([
+            (AdcpPd0ParsedKey.PRESSURE_VARIANCE, record.variable_data.pressure_variance),
+            (AdcpPd0ParsedKey.ADC_TRANSMIT_CURRENT, record.variable_data.transmit_current),
+            (AdcpPd0ParsedKey.ADC_AMBIENT_TEMP, record.variable_data.ambient_temperature),
+            (AdcpPd0ParsedKey.ADC_PRESSURE_PLUS, record.variable_data.pressure_positive),
+            (AdcpPd0ParsedKey.ADC_PRESSURE_MINUS, record.variable_data.pressure_negative),
+            (AdcpPd0ParsedKey.ADC_ATTITUDE_TEMP, record.variable_data.attitude_temperature),
+            (AdcpPd0ParsedKey.ADC_ATTITUDE, record.variable_data.attitude),
+            (AdcpPd0ParsedKey.ADC_CONTAMINATION_SENSOR, record.variable_data.contamination_sensor),
+            (AdcpPd0ParsedKey.ERROR_STATUS_WORD, record.variable_data.error_status_word),
+        ])
+        return [{DataParticleKey.VALUE_ID: key, DataParticleKey.VALUE: value} for key, value in fields]
+
+
+class BaseConfig(Pd0Base):
+    """
+    ADCP PD0 data particle
+    @throw SampleException if when break happens
+    """
+    _data_particle_type = AdcpDataParticleType.PD0_CONFIG
+
+    def _build_base_fields(self):
+        """
+        Parse the base portion of the particle
+        """
+        record = self.raw_data
+
+        fields = [
+            # FIXED LEADER
+            (AdcpPd0ParsedKey.FIRMWARE_VERSION, record.fixed_data.cpu_firmware_version),
+            (AdcpPd0ParsedKey.FIRMWARE_REVISION, record.fixed_data.cpu_firmware_revision),
+            (AdcpPd0ParsedKey.DATA_FLAG, record.fixed_data.simulation_data_flag),
+            (AdcpPd0ParsedKey.LAG_LENGTH, record.fixed_data.lag_length),
+            (AdcpPd0ParsedKey.NUM_BEAMS, record.fixed_data.number_of_beams),
+            (AdcpPd0ParsedKey.NUM_CELLS, record.fixed_data.number_of_cells),
+            (AdcpPd0ParsedKey.PINGS_PER_ENSEMBLE, record.fixed_data.pings_per_ensemble),
+            (AdcpPd0ParsedKey.DEPTH_CELL_LENGTH, record.fixed_data.depth_cell_length),
+            (AdcpPd0ParsedKey.BLANK_AFTER_TRANSMIT, record.fixed_data.blank_after_transmit),
+            (AdcpPd0ParsedKey.SIGNAL_PROCESSING_MODE, record.fixed_data.signal_processing_mode),
+            (AdcpPd0ParsedKey.LOW_CORR_THRESHOLD, record.fixed_data.low_corr_threshold),
+            (AdcpPd0ParsedKey.NUM_CODE_REPETITIONS, record.fixed_data.num_code_reps),
+            (AdcpPd0ParsedKey.PERCENT_GOOD_MIN, record.fixed_data.minimum_percentage),
+            (AdcpPd0ParsedKey.ERROR_VEL_THRESHOLD, record.fixed_data.error_velocity_max),
+            (AdcpPd0ParsedKey.TIME_PER_PING_MINUTES, record.fixed_data.tpp_minutes),
+            (AdcpPd0ParsedKey.TIME_PER_PING_SECONDS, record.fixed_data.tpp_seconds),
+            (AdcpPd0ParsedKey.TIME_PER_PING_HUNDREDTHS, record.fixed_data.tpp_hundredths),
+            (AdcpPd0ParsedKey.HEADING_ALIGNMENT, record.fixed_data.heading_alignment),
+            (AdcpPd0ParsedKey.HEADING_BIAS, record.fixed_data.heading_bias),
+            (AdcpPd0ParsedKey.REFERENCE_LAYER_START, record.fixed_data.starting_depth_cell),
+            (AdcpPd0ParsedKey.REFERENCE_LAYER_STOP, record.fixed_data.ending_depth_cell),
+            (AdcpPd0ParsedKey.FALSE_TARGET_THRESHOLD, record.fixed_data.false_target_threshold),
+            (AdcpPd0ParsedKey.TRANSMIT_LAG_DISTANCE, record.fixed_data.transmit_lag_distance),
+            (AdcpPd0ParsedKey.SERIAL_NUMBER, str(record.fixed_data.serial_number)),
+            # SYSCONFIG BITMAP
+            (AdcpPd0ParsedKey.SYSCONFIG_FREQUENCY, record.sysconfig.frequency),
+            (AdcpPd0ParsedKey.SYSCONFIG_BEAM_PATTERN, record.sysconfig.beam_pattern),
+            (AdcpPd0ParsedKey.SYSCONFIG_SENSOR_CONFIG, record.sysconfig.sensor_config),
+            (AdcpPd0ParsedKey.SYSCONFIG_HEAD_ATTACHED, record.sysconfig.xdcr_head_attached),
+            (AdcpPd0ParsedKey.SYSCONFIG_VERTICAL_ORIENTATION, record.sysconfig.beam_facing),
+            (AdcpPd0ParsedKey.SYSCONFIG_BEAM_ANGLE, record.sysconfig.beam_angle),
+            (AdcpPd0ParsedKey.SYSCONFIG_BEAM_CONFIG, record.sysconfig.janus_config),
+            # COORD TRANSFORM BITMAP
+            (AdcpPd0ParsedKey.COORD_TRANSFORM_TYPE, record.coord_transform.coord_transform),
+            (AdcpPd0ParsedKey.COORD_TRANSFORM_TILTS, record.coord_transform.tilts_used),
+            (AdcpPd0ParsedKey.COORD_TRANSFORM_BEAMS, record.coord_transform.three_beam_used),
+            (AdcpPd0ParsedKey.COORD_TRANSFORM_MAPPING, record.coord_transform.bin_mapping_used),
+            # SENSOR SOURCE BITMAP
+            (AdcpPd0ParsedKey.SENSOR_SOURCE_SPEED, record.sensor_source.calculate_ec),
+            (AdcpPd0ParsedKey.SENSOR_SOURCE_DEPTH, record.sensor_source.depth_used),
+            (AdcpPd0ParsedKey.SENSOR_SOURCE_HEADING, record.sensor_source.heading_used),
+            (AdcpPd0ParsedKey.SENSOR_SOURCE_PITCH, record.sensor_source.pitch_used),
+            (AdcpPd0ParsedKey.SENSOR_SOURCE_ROLL, record.sensor_source.roll_used),
+            (AdcpPd0ParsedKey.SENSOR_SOURCE_CONDUCTIVITY, record.sensor_source.conductivity_used),
+            (AdcpPd0ParsedKey.SENSOR_SOURCE_TEMPERATURE, record.sensor_source.temperature_used),
+            # SENSOR AVAIL BITMAP
+            (AdcpPd0ParsedKey.SENSOR_AVAILABLE_SPEED, record.sensor_avail.speed_avail),
+            (AdcpPd0ParsedKey.SENSOR_AVAILABLE_DEPTH, record.sensor_avail.depth_avail),
+            (AdcpPd0ParsedKey.SENSOR_AVAILABLE_HEADING, record.sensor_avail.heading_avail),
+            (AdcpPd0ParsedKey.SENSOR_AVAILABLE_PITCH, record.sensor_avail.pitch_avail),
+            (AdcpPd0ParsedKey.SENSOR_AVAILABLE_ROLL, record.sensor_avail.roll_avail),
+            (AdcpPd0ParsedKey.SENSOR_AVAILABLE_CONDUCTIVITY, record.sensor_avail.conductivity_avail),
+            (AdcpPd0ParsedKey.SENSOR_AVAILABLE_TEMPERATURE, record.sensor_avail.temperature_avail),
+            ]
+
+        return fields
+
+
+class GliderConfig(BaseConfig):
+    def _build_parsed_values(self):
+        record = self.raw_data
+        fields = self._build_base_fields()
+        fields.extend([
+            (AdcpPd0ParsedKey.SYSTEM_BANDWIDTH, record.fixed_data.system_bandwidth),
+            (AdcpPd0ParsedKey.SENSOR_SOURCE_TEMPERATURE_EU, record.sensor_source.temperature_eu_used),
+            (AdcpPd0ParsedKey.SENSOR_AVAILABLE_TEMPERATURE_EU, record.sensor_avail.temperature_eu_avail),
+        ])
+        return [{DataParticleKey.VALUE_ID: key, DataParticleKey.VALUE: value} for key, value in fields]
+
+
+class AdcpsConfig(BaseConfig):
+    def _build_parsed_values(self):
+        record = self.raw_data
+        fields = self._build_base_fields()
+        fields.extend([
+            (AdcpPd0ParsedKey.LOW_LATENCY_TRIGGER, record.fixed_data.spare1),
+            (AdcpPd0ParsedKey.CPU_SERIAL_NUM, str(record.fixed_data.cpu_board_serial_number)),
+            (AdcpPd0ParsedKey.SYSTEM_BANDWIDTH, record.fixed_data.system_bandwidth),
+            (AdcpPd0ParsedKey.SYSTEM_POWER, record.fixed_data.system_power),
+            (AdcpPd0ParsedKey.BEAM_ANGLE, record.fixed_data.beam_angle),
+        ])
+        return [{DataParticleKey.VALUE_ID: key, DataParticleKey.VALUE: value} for key, value in fields]
+
+
+class AuvConfig(BaseConfig):
+    def _build_parsed_values(self):
+        record = self.raw_data
+        fields = self._build_base_fields()
+        fields.extend([
+            (AdcpPd0ParsedKey.LOW_LATENCY_TRIGGER, record.fixed_data.spare1),
+            (AdcpPd0ParsedKey.BEAM_ANGLE, record.fixed_data.beam_angle),
+        ])
+        return [{DataParticleKey.VALUE_ID: key, DataParticleKey.VALUE: value} for key, value in fields]
+
+
+class BaseBottom(Pd0Base):
+    def _build_fields(self):
+        record = self.raw_data
+
+        # need to combine LSBs and MSBs of ranges
+        beam1_bt_range = record.bottom_track.range_1 + (record.bottom_track.range_msb_1 << 16)
+        beam2_bt_range = record.bottom_track.range_2 + (record.bottom_track.range_msb_2 << 16)
+        beam3_bt_range = record.bottom_track.range_3 + (record.bottom_track.range_msb_3 << 16)
+        beam4_bt_range = record.bottom_track.range_4 + (record.bottom_track.range_msb_4 << 16)
+
+        fields = [
+            (AdcpPd0ParsedKey.BT_BEAM1_RANGE, beam1_bt_range),
+            (AdcpPd0ParsedKey.BT_BEAM2_RANGE, beam2_bt_range),
+            (AdcpPd0ParsedKey.BT_BEAM3_RANGE, beam3_bt_range),
+            (AdcpPd0ParsedKey.BT_BEAM4_RANGE, beam4_bt_range),
+            (AdcpPd0ParsedKey.BT_BEAM1_CORRELATION, record.bottom_track.corr_1),
+            (AdcpPd0ParsedKey.BT_BEAM2_CORRELATION, record.bottom_track.corr_2),
+            (AdcpPd0ParsedKey.BT_BEAM3_CORRELATION, record.bottom_track.corr_3),
+            (AdcpPd0ParsedKey.BT_BEAM4_CORRELATION, record.bottom_track.corr_4),
+            (AdcpPd0ParsedKey.BT_BEAM1_EVAL_AMP, record.bottom_track.amp_1),
+            (AdcpPd0ParsedKey.BT_BEAM2_EVAL_AMP, record.bottom_track.amp_2),
+            (AdcpPd0ParsedKey.BT_BEAM3_EVAL_AMP, record.bottom_track.amp_3),
+            (AdcpPd0ParsedKey.BT_BEAM4_EVAL_AMP, record.bottom_track.amp_4),
+            (AdcpPd0ParsedKey.BT_BEAM1_PERCENT_GOOD, record.bottom_track.pcnt_1),
+            (AdcpPd0ParsedKey.BT_BEAM2_PERCENT_GOOD, record.bottom_track.pcnt_2),
+            (AdcpPd0ParsedKey.BT_BEAM3_PERCENT_GOOD, record.bottom_track.pcnt_3),
+            (AdcpPd0ParsedKey.BT_BEAM4_PERCENT_GOOD, record.bottom_track.pcnt_4),
+            (AdcpPd0ParsedKey.BT_BEAM1_REF_CORRELATION, record.bottom_track.ref_corr_1),
+            (AdcpPd0ParsedKey.BT_BEAM2_REF_CORRELATION, record.bottom_track.ref_corr_2),
+            (AdcpPd0ParsedKey.BT_BEAM3_REF_CORRELATION, record.bottom_track.ref_corr_3),
+            (AdcpPd0ParsedKey.BT_BEAM4_REF_CORRELATION, record.bottom_track.ref_corr_4),
+            (AdcpPd0ParsedKey.BT_BEAM1_REF_INTENSITY, record.bottom_track.ref_amp_1),
+            (AdcpPd0ParsedKey.BT_BEAM2_REF_INTENSITY, record.bottom_track.ref_amp_2),
+            (AdcpPd0ParsedKey.BT_BEAM3_REF_INTENSITY, record.bottom_track.ref_amp_3),
+            (AdcpPd0ParsedKey.BT_BEAM4_REF_INTENSITY, record.bottom_track.ref_amp_4),
+            (AdcpPd0ParsedKey.BT_BEAM1_REF_PERCENT_GOOD, record.bottom_track.ref_pcnt_1),
+            (AdcpPd0ParsedKey.BT_BEAM2_REF_PERCENT_GOOD, record.bottom_track.ref_pcnt_2),
+            (AdcpPd0ParsedKey.BT_BEAM3_REF_PERCENT_GOOD, record.bottom_track.ref_pcnt_3),
+            (AdcpPd0ParsedKey.BT_BEAM4_REF_PERCENT_GOOD, record.bottom_track.ref_pcnt_4),
+            (AdcpPd0ParsedKey.BT_BEAM1_RSSI_AMPLITUDE, record.bottom_track.rssi_1),
+            (AdcpPd0ParsedKey.BT_BEAM2_RSSI_AMPLITUDE, record.bottom_track.rssi_2),
+            (AdcpPd0ParsedKey.BT_BEAM3_RSSI_AMPLITUDE, record.bottom_track.rssi_3),
+            (AdcpPd0ParsedKey.BT_BEAM4_RSSI_AMPLITUDE, record.bottom_track.rssi_4),
+            (AdcpPd0ParsedKey.BT_REF_LAYER_MIN, record.bottom_track.ref_layer_min),
+            (AdcpPd0ParsedKey.BT_REF_LAYER_NEAR, record.bottom_track.ref_layer_near),
+            (AdcpPd0ParsedKey.BT_REF_LAYER_FAR, record.bottom_track.ref_layer_far),
+            (AdcpPd0ParsedKey.BT_GAIN, record.bottom_track.gain),
+            ]
+        return fields
+
+
+class EarthBottom(BaseBottom):
+    _data_particle_type = AdcpDataParticleType.BOTTOM_TRACK_EARTH
+
+    def _build_parsed_values(self):
+        record = self.raw_data
+        fields = self._build_fields()
+        fields.extend([
+            (AdcpPd0ParsedKey.BT_EASTWARD_VELOCITY, record.bottom_track.velocity_1),
+            (AdcpPd0ParsedKey.BT_NORTHWARD_VELOCITY, record.bottom_track.velocity_2),
+            (AdcpPd0ParsedKey.BT_UPWARD_VELOCITY, record.bottom_track.velocity_3),
+            (AdcpPd0ParsedKey.BT_ERROR_VELOCITY, record.bottom_track.velocity_4),
+
+            (AdcpPd0ParsedKey.BT_EASTWARD_REF_LAYER_VELOCITY, record.bottom_track.ref_velocity_1),
+            (AdcpPd0ParsedKey.BT_NORTHWARD_REF_LAYER_VELOCITY, record.bottom_track.ref_velocity_2),
+            (AdcpPd0ParsedKey.BT_UPWARD_REF_LAYER_VELOCITY, record.bottom_track.ref_velocity_3),
+            (AdcpPd0ParsedKey.BT_ERROR_REF_LAYER_VELOCITY, record.bottom_track.ref_velocity_4),
+        ])
+
+        return [{DataParticleKey.VALUE_ID: key, DataParticleKey.VALUE: value} for key, value in fields]
+
+
+class InstBottom(BaseBottom):
+    _data_particle_type = AdcpDataParticleType.BOTTOM_TRACK_INST
+
+    def _build_parsed_values(self):
+        record = self.raw_data
+        fields = self._build_fields()
+        fields.extend([
+            (AdcpPd0ParsedKey.BT_FORWARD_VELOCITY, record.bottom_track.velocity_1),
+            (AdcpPd0ParsedKey.BT_STARBOARD_VELOCITY, record.bottom_track.velocity_2),
+            (AdcpPd0ParsedKey.BT_VERTICAL_VELOCITY, record.bottom_track.velocity_3),
+            (AdcpPd0ParsedKey.BT_ERROR_VELOCITY, record.bottom_track.velocity_4),
+
+            (AdcpPd0ParsedKey.BT_FORWARD_REF_LAYER_VELOCITY, record.bottom_track.ref_velocity_1),
+            (AdcpPd0ParsedKey.BT_STARBOARD_REF_LAYER_VELOCITY, record.bottom_track.ref_velocity_2),
+            (AdcpPd0ParsedKey.BT_VERTICAL_REF_LAYER_VELOCITY, record.bottom_track.ref_velocity_3),
+            (AdcpPd0ParsedKey.BT_ERROR_REF_LAYER_VELOCITY, record.bottom_track.ref_velocity_4)
+        ])
+
+        return [{DataParticleKey.VALUE_ID: key, DataParticleKey.VALUE: value} for key, value in fields]
+
+
+class BottomConfig(Pd0Base):
+    _data_particle_type = AdcpDataParticleType.BOTTOM_TRACK_CONFIG
+
+    def _build_parsed_values(self):
+        record = self.raw_data
+
+        fields = [
+            (AdcpPd0ParsedKey.BT_PINGS_PER_ENSEMBLE, record.bottom_track.pings_per_ensemble),
+            (AdcpPd0ParsedKey.BT_DELAY_BEFORE_REACQUIRE, record.bottom_track.delay_before_reacquire),
+            (AdcpPd0ParsedKey.BT_CORR_MAGNITUDE_MIN, record.bottom_track.correlation_mag_min),
+            (AdcpPd0ParsedKey.BT_EVAL_MAGNITUDE_MIN, record.bottom_track.eval_amplitude_min),
+            (AdcpPd0ParsedKey.BT_PERCENT_GOOD_MIN, record.bottom_track.percent_good_minimum),
+            (AdcpPd0ParsedKey.BT_MODE, record.bottom_track.mode),
+            (AdcpPd0ParsedKey.BT_ERROR_VELOCITY_MAX, record.bottom_track.error_velocity_max),
+            (AdcpPd0ParsedKey.BT_MAX_DEPTH, record.bottom_track.max_depth),
+        ]
+
+        return [{DataParticleKey.VALUE_ID: key, DataParticleKey.VALUE: value} for key, value in fields]
+
+
+class AdcpPd0Parser(SimpleParser):
+    def __init__(self, *args, **kwargs):
+        super(AdcpPd0Parser, self).__init__(*args, **kwargs)
+        self._particle_classes = self._config[DataSetDriverConfigKeys.PARTICLE_CLASSES_DICT]
+        self._particle_classes = {k: globals()[v] for k, v in self._particle_classes.iteritems()}
+        self._glider = GliderConfig in self._particle_classes.values()
+        self._last_values = {}
+
+    def _changed(self, particle):
+        particle_dict = particle.generate_dict()
+        stream = particle_dict.get('stream_name')
+        values = particle_dict.get('values')
+        last_values = self._last_values.get(stream)
+        if values == last_values:
+            return False
+
+        self._last_values[stream] = values
+        return True
+
+    def parse_file(self):
+        """
+        Entry point into parsing the file
+        Loop through the file one ensemble at a time
         """
 
-        self.final_result = []
+        position = 0  # set position to beginning of file
+        header_id_bytes = self._stream_handle.read(2)  # read the first two bytes of the file
 
-        #set particle type specifics
-        if self._file_type == AdcpFileType.ADCPA_FILE:
-            fixed_leader_bytes = ADCPA_FIXED_LEADER_BYTES
-            variable_leader_bytes = ADCPA_VARIABLE_LEADER_BYTES
-            bottom_track_bytes = ADCPA_BOTTOM_TRACK_BYTES
-        elif self._file_type == AdcpFileType.ADCPS_File:
-            fixed_leader_bytes = ADCPS_FIXED_LEADER_BYTES
-            variable_leader_bytes = ADCPS_VARIABLE_LEADER_BYTES
-            bottom_track_bytes = ADCPS_BOTTOM_TRACK_BYTES
-        else:
-            raise SampleException('invalid file type')
+        while header_id_bytes:  # will be None when EOF is found
 
-        #parse the file header
-        (header_id, data_source_id, num_bytes, spare, num_data_types) = \
-            struct.unpack_from('<BBHBB', self.raw_data)
+            if header_id_bytes == ADCPS_PD0_HEADER_REGEX:
 
-        #log.debug("_build_parsed_values Number of data types = %d", num_data_types )
+                # get the ensemble size from the next 2 bytes (excludes checksum bytes)
+                num_bytes = struct.unpack("<H", self._stream_handle.read(2))[0]
 
-        offsets = []  # create list for offsets
-        start = FIXED_HEADER_BYTES  # offsets start at byte 6 (using 0 indexing)
-        data_types_idx = 1  # counter for n data types
-        fixed_leader_found = False
+                self._stream_handle.seek(position)  # reset to beginning of ensemble
+                input_buffer = self._stream_handle.read(num_bytes + 2)  # read entire ensemble
 
-        while data_types_idx <= num_data_types:
-            value = struct.unpack_from('<H', self.raw_data, start)[0]
+                if len(input_buffer) == num_bytes + 2:  # make sure there are enough bytes including checksum
 
-            #log.debug("_build_parsed_values Offset for data type %d is %d ", num_data_types, value )
-            offsets.append(value)
-            start += NUM_BYTES_BYTES
-            data_types_idx += 1
+                    try:
+                        pd0 = AdcpPd0Record(input_buffer, glider=self._glider)
 
-        for offset in offsets:
-            # for each offset, using the starting byte, determine the data type
-            # and then parse accordingly.
-            data_type = struct.unpack_from('<H', self.raw_data, offset)[0]
+                        velocity = self._particle_classes['velocity'](pd0)
+                        self._record_buffer.append(velocity)
 
-            #log.debug("_build_parsed_values Processing at byte %d", offset)
-            #log.debug("_build_parsed_values ID is %d", data_type)
+                        config = self._particle_classes['config'](pd0)
+                        engineering = self._particle_classes['engineering'](pd0)
 
-            # fixed leader data (x00x00)
-            if data_type == FIXED_LEADER_ID:
-                data = self.raw_data[offset:offset + fixed_leader_bytes]
-                self.parse_fixed_leader(data)
-                fixed_leader_found = True
-                num_cells = self.num_depth_cells  # grab the # of depth cells
-                # obtained from the fixed leader
-                # data type
+                        for particle in [config, engineering]:
+                            if self._changed(particle):
+                                self._record_buffer.append(particle)
 
-            # variable leader data (x80x00)
-            elif data_type == VARIABLE_LEADER_ID:
-                data = self.raw_data[offset:offset + variable_leader_bytes]
-                self.parse_variable_leader(data)
+                        if hasattr(pd0, 'bottom_track'):
+                            bt = self._particle_classes['bottom_track'](pd0)
+                            bt_config = self._particle_classes['bottom_track_config'](pd0)
+                            self._record_buffer.append(bt)
 
-            # velocity data (x00x01)
-            elif data_type == VELOCITY_ID:
+                            if self._changed(bt_config):
+                                self._record_buffer.append(bt_config)
 
-                if not fixed_leader_found:
-                    raise SampleException("No Fixed leader")
+                    except PD0ParsingException:
+                        # seek to just past this header match
+                        # self._stream_handle.seek(position + 2)
+                        self._exception_callback(RecoverableSampleException("Exception parsing PD0"))
 
-                # number of bytes is a function of the user selectable number of
-                # depth cells (WN command), calculated above
-                num_bytes = ID_BYTES + VELOCITY_BYTES_PER_CELL * num_cells
-                data = self.raw_data[offset:offset + num_bytes]
-                self.parse_velocity_data(data)
+                else:  # reached EOF
+                    log.warn("not enough bytes left for complete ensemble")
+                    self._exception_callback(UnexpectedDataException("Found incomplete ensemble at end of file"))
 
-            # correlation magnitude data (x00x02)
-            elif data_type == CORRELATION_ID:
-                if not fixed_leader_found:
-                    raise SampleException("No Fixed leader")
+            else:  # did not get header ID bytes
+                log.warn('did not find header ID bytes')
+                self._exception_callback(RecoverableSampleException(
+                    "Did not find Header ID bytes where expected, trying next 2 bytes"))
 
-                # number of bytes is a function of the user selectable number of
-                # depth cells (WN command), calculated above
-                num_bytes = ID_BYTES + CORRELATION_BYTES_PER_CELL * num_cells
-                data = self.raw_data[offset:offset + num_bytes]
-                self.parse_correlation_magnitude_data(data)
-
-            # echo intensity data (x00x03)
-            elif data_type == ECHO_INTENSITY_ID:
-                if not fixed_leader_found:
-                    raise SampleException("No Fixed leader")
-
-                # number of bytes is a function of the user selectable number of
-                # depth cells (WN command), calculated above
-                num_bytes = ID_BYTES + ECHO_INTENSITY_BYTES_PER_CELL * num_cells
-                data = self.raw_data[offset:offset + num_bytes]
-                self.parse_echo_intensity_data(data)
-
-            # percent-good data (x00x04)
-            elif data_type == PERCENT_GOOD_ID:
-                if not fixed_leader_found:
-                    raise SampleException("No Fixed leader")
-
-                # number of bytes is a function of the user selectable number of
-                # depth cells (WN command), calculated above
-                num_bytes = ID_BYTES + PERCENT_GOOD_BYTES_PER_CELL * num_cells
-                data = self.raw_data[offset:offset + num_bytes]
-                self.parse_percent_good_data(data)
-
-            # bottom track data (x00x06)
-            elif data_type == BOTTOM_TRACK_ID:
-                if not fixed_leader_found:
-                    raise SampleException("No Fixed leader")
-
-                data = self.raw_data[offset:offset + bottom_track_bytes]
-                self.parse_bottom_track_data(data)
-            else:
-                log.warn("Found unrecognizeable data type ID in PD0 file. ID(hex) = %.4x ", data_type)
-        return self.final_result
-
-    def parse_fixed_leader(self, data):
-        """
-        Parse the fixed leader portion of the particle
-       """
-        (fixed_leader_id, firmware_version, firmware_revision,
-         sysconfig_lsb, sysconfig_msb, data_flag, lag_length, num_beams, num_cells,
-         pings_per_ensemble, depth_cell_length, blank_after_transmit,
-         signal_processing_mode, low_corr_threshold, num_code_repetitions,
-         percent_good_min, error_vel_threshold, time_per_ping_minutes,
-         time_per_ping_seconds, time_per_ping_hundredths, coord_transform_type,
-         heading_alignment, heading_bias, sensor_source, sensor_available,
-         bin_1_distance, transmit_pulse_length, reference_layer_start,
-         reference_layer_stop, false_target_threshold, low_latency_trigger,
-         transmit_lag_distance, cpu_serial_num, system_bandwidth,
-         system_power, SPARE2, serial_number) = \
-            struct.unpack_from('<H8B3H4BH4B2h2B2H4BHQH2BI', data)
-
-        # store the number of depth cells for use elsewhere
-        self.num_depth_cells = num_cells
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.FIRMWARE_VERSION,
-                                                    firmware_version, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.FIRMWARE_REVISION,
-                                                    firmware_revision, int))
-
-        frequencies = [75, 150, 300, 600, 1200, 2400]
-
-        #following items all pulled from the sys config LSB
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SYSCONFIG_FREQUENCY,
-                                                    frequencies[sysconfig_lsb & 0b00000111], int))
-        #bitwise and to extract the frequency index
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SYSCONFIG_BEAM_PATTERN,
-                                                    1 if sysconfig_lsb & 0b00001000 else 0, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SYSCONFIG_SENSOR_CONFIG,
-                                                    (sysconfig_lsb & 0b00110000) >> 4, int))
-        #bitwise right shift 4 bits
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SYSCONFIG_HEAD_ATTACHED,
-                                                    1 if sysconfig_lsb & 0b01000000 else 0, int))
-        self.final_result.append(
-            self._encode_value(AdcpPd0ParserDataParticleKey.SYSCONFIG_VERTICAL_ORIENTATION,
-                               1 if sysconfig_lsb & 0b10000000 else 0, int))
-
-        #following items all pulled from the sys config MSB
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SYSCONFIG_BEAM_ANGLE,
-                                                    sysconfig_msb & 0b00000011, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SYSCONFIG_BEAM_CONFIG,
-                                                    (sysconfig_msb & 0b11110000) >> 4, int))
-        #bitwise right shift 4 bits note: must do the and first then shift
-
-        if 0 != data_flag:
-            log.warn("real/sim data_flag was not equal to 0")
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.DATA_FLAG,
-                                                    data_flag, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.LAG_LENGTH,
-                                                    lag_length, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.NUM_BEAMS,
-                                                    num_beams, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.NUM_CELLS,
-                                                    num_cells, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.PINGS_PER_ENSEMBLE,
-                                                    pings_per_ensemble, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.DEPTH_CELL_LENGTH,
-                                                    depth_cell_length, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BLANK_AFTER_TRANSMIT,
-                                                    blank_after_transmit, int))
-
-        if 1 != signal_processing_mode:
-            log.warn("signal_processing_mode was not equal to 1")
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SIGNAL_PROCESSING_MODE,
-                                                    signal_processing_mode, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.LOW_CORR_THRESHOLD,
-                                                    low_corr_threshold, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.NUM_CODE_REPETITIONS,
-                                                    num_code_repetitions, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.PERCENT_GOOD_MIN,
-                                                    percent_good_min, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ERROR_VEL_THRESHOLD,
-                                                    error_vel_threshold, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.TIME_PER_PING_MINUTES,
-                                                    time_per_ping_minutes, int))
-
-        tpp_float_seconds = time_per_ping_seconds + (time_per_ping_hundredths / 100.0)
-        #combine seconds and hundreds into a float
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.TIME_PER_PING_SECONDS,
-                                                    tpp_float_seconds, float))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.COORD_TRANSFORM_TYPE,
-                                                    (coord_transform_type & 0b00011000) >> 3, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.COORD_TRANSFORM_TILTS,
-                                                    1 if coord_transform_type & 0b00000100 else 0, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.COORD_TRANSFORM_BEAMS,
-                                                    1 if coord_transform_type & 0b0000010 else 0, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.COORD_TRANSFORM_MAPPING,
-                                                    1 if coord_transform_type & 0b00000001 else 0, int))
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.HEADING_ALIGNMENT,
-                                                    heading_alignment, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.HEADING_BIAS,
-                                                    heading_bias, int))
-
-        # Note the sensor source and sensor available fields are decoded differently
-        # for the different file types
-        if self._file_type == AdcpFileType.ADCPS_File:
-            #pull the following out of the sensor source byte
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_SPEED,
-                                                        1 if sensor_source & 0b01000000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_DEPTH,
-                                                        1 if sensor_source & 0b00100000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_HEADING,
-                                                        1 if sensor_source & 0b00010000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_PITCH,
-                                                        1 if sensor_source & 0b00001000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_ROLL,
-                                                        1 if sensor_source & 0b00000100 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_CONDUCTIVITY,
-                                                        1 if sensor_source & 0b00000010 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_TEMPERATURE,
-                                                        1 if sensor_source & 0b00000001 else 0, int))
-
-            #pull the following out of the sensor available byte
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_SPEED,
-                                                        1 if sensor_available & 0b01000000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_DEPTH,
-                                                        1 if sensor_available & 0b00100000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_HEADING,
-                                                        1 if sensor_available & 0b00010000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_PITCH,
-                                                        1 if sensor_available & 0b00001000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_ROLL,
-                                                        1 if sensor_available & 0b00000100 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_CONDUCTIVITY,
-                                                        1 if sensor_available & 0b00000010 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_TEMPERATURE,
-                                                        1 if sensor_available & 0b00000001 else 0, int))
-        else:  # decoding below is for ADCPA variants
-            #pull the following out of the sensor source byte
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_SPEED,
-                                                        1 if sensor_source & 0b10000000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_DEPTH,
-                                                        1 if sensor_source & 0b01000000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_HEADING,
-                                                        1 if sensor_source & 0b00100000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_PITCH,
-                                                        1 if sensor_source & 0b00010000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_ROLL,
-                                                        1 if sensor_source & 0b00001000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_CONDUCTIVITY,
-                                                        1 if sensor_source & 0b00000100 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_TEMPERATURE,
-                                                        1 if sensor_source & 0b00000010 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_SOURCE_TEMPERATURE_EU,
-                                                        1 if sensor_source & 0b00000001 else 0, int))
-
-            #pull the following out of the sensor available byte
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_SPEED,
-                                                        1 if sensor_available & 0b10000000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_DEPTH,
-                                                        1 if sensor_available & 0b01000000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_HEADING,
-                                                        1 if sensor_available & 0b00100000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_PITCH,
-                                                        1 if sensor_available & 0b00010000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_ROLL,
-                                                        1 if sensor_available & 0b00001000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_CONDUCTIVITY,
-                                                        1 if sensor_available & 0b00000100 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_TEMPERATURE,
-                                                        1 if sensor_available & 0b00000010 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SENSOR_AVAILABLE_TEMPERATURE_EU,
-                                                        1 if sensor_available & 0b00000001 else 0, int))
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BIN_1_DISTANCE,
-                                                    bin_1_distance, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.TRANSMIT_PULSE_LENGTH,
-                                                    transmit_pulse_length, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.REFERENCE_LAYER_START,
-                                                    reference_layer_start, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.REFERENCE_LAYER_STOP,
-                                                    reference_layer_stop, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.FALSE_TARGET_THRESHOLD,
-                                                    false_target_threshold, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.TRANSMIT_LAG_DISTANCE,
-                                                    transmit_lag_distance, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SYSTEM_BANDWIDTH,
-                                                    system_bandwidth, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SERIAL_NUMBER,
-                                                    serial_number, int))
-
-        #following parameters only exist in ADCPS_JLN_INSTRUMENT particles
-        if self._file_type == AdcpFileType.ADCPS_File:
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.LOW_LATENCY_TRIGGER,
-                                                        low_latency_trigger, int))
-            #this is "SPARE" byte in vendor doc, see comments in IDD Record Structure section
-
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.CPU_SERIAL_NUM,
-                                                        cpu_serial_num, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SYSTEM_POWER,
-                                                        system_power, int))
-            beam_angle = struct.unpack('<B', data[-1:])[0]  # beam angle is last byte
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BEAM_ANGLE,
-                                                        beam_angle, int))
-
-    def parse_variable_leader(self, data):
-        """
-        Parse the variable leader portion of the particle
-        """
-        rtc = {}
-        rtc2 = {}
-
-        (variable_leader_id, ensemble_number, rtc['year'], rtc['month'],
-         rtc['day'], rtc['hour'], rtc['minute'], rtc['second'],
-         rtc['hundredths'], ensemble_number_increment, error_bit_field,
-         reserved_error_bit_field, speed_of_sound, transducer_depth, heading,
-         pitch, roll, salinity, temperature, mpt_minutes, mpt_seconds_component,
-         mpt_hundredths_component, heading_stdev, pitch_stdev, roll_stdev,
-         adc_transmit_current, adc_transmit_voltage, adc_ambient_temp,
-         adc_pressure_plus, adc_pressure_minus, adc_attitude_temp,
-         adc_attitiude, adc_contamination_sensor, error_status_word_1,
-         error_status_word_2, error_status_word_3, error_status_word_4,
-         SPARE1, pressure, pressure_variance, SPARE2) = \
-            struct.unpack_from('<2H10B3H2hHh18BH2II', data)
-            #Note: the ADCPS leader has extra bytes at end, handled lower in method
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ENSEMBLE_NUMBER,
-                                                    ensemble_number, int))
-
-        # convert individual date and time values to datetime object and
-        # calculate the NTP timestamp (seconds since Jan 1, 1900), per OOI
-        # convention
-        dts = dt.datetime(2000 + rtc['year'], rtc['month'], rtc['day'],
-                          rtc['hour'], rtc['minute'], rtc['second'])
-        epoch_ts = timegm(dts.timetuple()) + (rtc['hundredths'] / 100.0)  # seconds since 1970-01-01 in UTC
-        ntp_ts = ntplib.system_to_ntp_time(epoch_ts)
-
-        self.set_internal_timestamp(ntp_ts)
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.REAL_TIME_CLOCK,
-                                                    [rtc['year'], rtc['month'], rtc['day'],
-                                                     rtc['hour'], rtc['minute'], rtc['second'],
-                                                     rtc['hundredths']], list))
-        #IDD calls for array of 8, may need to hard code century
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ENSEMBLE_START_TIME,
-                                                    ntp_ts, float))
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ENSEMBLE_NUMBER_INCREMENT,
-                                                    ensemble_number_increment, int))
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SPEED_OF_SOUND,
-                                                    speed_of_sound, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.TRANSDUCER_DEPTH,
-                                                    transducer_depth, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.HEADING,
-                                                    heading, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.PITCH,
-                                                    pitch, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ROLL,
-                                                    roll, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SALINITY,
-                                                    salinity, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.TEMPERATURE,
-                                                    temperature, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.MPT_MINUTES,
-                                                    mpt_minutes, int))
-
-        mpt_seconds = float(mpt_seconds_component + (mpt_hundredths_component / 100.0))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.MPT_SECONDS,
-                                                    mpt_seconds, float))
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.HEADING_STDEV,
-                                                    heading_stdev, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.PITCH_STDEV,
-                                                    pitch_stdev, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ROLL_STDEV,
-                                                    roll_stdev, int))
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.PRESSURE,
-                                                    pressure, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.PRESSURE_VARIANCE,
-                                                    pressure_variance, int))
-
-        # ADC_TRANSMIT_VOLTAGE is the only parameter in the ADC Channel group
-        # that is used in all variants of PD0 based parsers & particles
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ADC_TRANSMIT_VOLTAGE,
-                                                    adc_transmit_voltage, int))
-
-        # the remaining ADC Channels and the individual parts of the error status words
-        # are only published for ADPCS/ADCPT file types
-        # ADCPA publishes the raw BIT result word and the BIT error count
-        # RTC 2 fields and corresponding outputs only exist for ADPCS/ADCPT file types
-        if self._file_type == AdcpFileType.ADCPS_File:
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ADC_TRANSMIT_CURRENT,
-                                                        adc_transmit_current, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ADC_AMBIENT_TEMP,
-                                                        adc_ambient_temp, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ADC_PRESSURE_PLUS,
-                                                        adc_pressure_plus, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ADC_PRESSURE_MINUS,
-                                                        adc_pressure_minus, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ADC_ATTITUDE_TEMP,
-                                                        adc_attitude_temp, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ADC_ATTITUDE,
-                                                        adc_attitiude, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ADC_CONTAMINATION_SENSOR,
-                                                        adc_contamination_sensor, int))
-
-            #decode the BIT test byte
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BIT_RESULT_DEMOD_1,
-                                                        1 if error_bit_field & 0b00010000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BIT_RESULT_DEMOD_0,
-                                                        1 if error_bit_field & 0b00001000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BIT_RESULT_TIMING,
-                                                        1 if error_bit_field & 0b00000010 else 0, int))
-
-            #decode the error status bytes
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BUS_ERROR_EXCEPTION,
-                                                        1 if error_status_word_1 & 0b00000001 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ADDRESS_ERROR_EXCEPTION,
-                                                        1 if error_status_word_1 & 0b00000010 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ILLEGAL_INSTRUCTION_EXCEPTION,
-                                                        1 if error_status_word_1 & 0b00000100 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ZERO_DIVIDE_INSTRUCTION,
-                                                        1 if error_status_word_1 & 0b00001000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.EMULATOR_EXCEPTION,
-                                                        1 if error_status_word_1 & 0b00010000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.UNASSIGNED_EXCEPTION,
-                                                        1 if error_status_word_1 & 0b00100000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.WATCHDOG_RESTART_OCCURRED,
-                                                        1 if error_status_word_1 & 0b01000000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BATTERY_SAVER_POWER,
-                                                        1 if error_status_word_1 & 0b10000000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.PINGING,
-                                                        1 if error_status_word_2 & 0b00000001 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.COLD_WAKEUP_OCCURRED,
-                                                        1 if error_status_word_2 & 0b01000000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.UNKNOWN_WAKEUP_OCCURRED,
-                                                        1 if error_status_word_2 & 0b10000000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.CLOCK_READ_ERROR,
-                                                        1 if error_status_word_3 & 0b00000001 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.UNEXPECTED_ALARM,
-                                                        1 if error_status_word_3 & 0b00000010 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.CLOCK_JUMP_FORWARD,
-                                                        1 if error_status_word_3 & 0b00000100 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.CLOCK_JUMP_BACKWARD,
-                                                        1 if error_status_word_3 & 0b00001000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.POWER_FAIL,
-                                                        1 if error_status_word_4 & 0b00001000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SPURIOUS_DSP_INTERRUPT,
-                                                        1 if error_status_word_4 & 0b00010000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SPURIOUS_UART_INTERRUPT,
-                                                        1 if error_status_word_4 & 0b00100000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.SPURIOUS_CLOCK_INTERRUPT,
-                                                        1 if error_status_word_4 & 0b01000000 else 0, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.LEVEL_7_INTERRUPT,
-                                                        1 if error_status_word_4 & 0b10000000 else 0, int))
-
-            #RTC2 values are last 8 bytes when provided
-            (rtc2['century'], rtc2['year'], rtc2['month'],
-             rtc2['day'], rtc2['hour'], rtc2['minute'], rtc2['second'],
-             rtc2['hundredths']) = struct.unpack('<8B', data[-8:])
-
-            dts = dt.datetime(rtc2['century'] * 100 + rtc2['year'], rtc2['month'], rtc2['day'],
-                              rtc2['hour'], rtc2['minute'], rtc2['second'])
-
-            epoch_ts = timegm(dts.timetuple()) + (rtc2['hundredths'] / 100.0)  # seconds since 1970-01-01 in UTC
-            ntp_ts = ntplib.system_to_ntp_time(epoch_ts)
-
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.REAL_TIME_CLOCK2,
-                                                        [rtc2['century'], rtc['year'], rtc['month'], rtc['day'],
-                                                         rtc['hour'], rtc['minute'], rtc['second'],
-                                                         rtc['hundredths']], list))
-
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ENSEMBLE_START_TIME2,
-                                                        ntp_ts, float))
-        else:  # ADCPA simply puts out the BIT status word and the BIT error count
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BIT_ERROR_NUMBER,
-                                                        error_bit_field, int))
-            self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BIT_ERROR_COUNT,
-                                                        reserved_error_bit_field, int))
-
-    def parse_velocity_data(self, data):
-        """
-        Parse the velocity portion of the particle
-        """
-        num_cells = self.num_depth_cells
-        offset = ID_BYTES
-
-        water_velocity_east = []
-        water_velocity_north = []
-        water_velocity_up = []
-        error_velocity = []
-        for row in range(0, num_cells):
-            (a, b, c, d) = struct.unpack_from('<4h', data, offset)
-            water_velocity_east.append(a)
-            water_velocity_north.append(b)
-            water_velocity_up.append(c)
-            error_velocity.append(d)
-            offset += VELOCITY_BYTES_PER_CELL
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.WATER_VELOCITY_EAST,
-                                                    water_velocity_east, list))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.WATER_VELOCITY_NORTH,
-                                                    water_velocity_north, list))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.WATER_VELOCITY_UP,
-                                                    water_velocity_up, list))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ERROR_VELOCITY,
-                                                    error_velocity, list))
-
-    def parse_correlation_magnitude_data(self, data):
-        """
-        Parse the correlation magnitude portion of the particle
-        """
-        num_cells = self.num_depth_cells
-        offset = ID_BYTES
-
-        correlation_magnitude_beam1 = []
-        correlation_magnitude_beam2 = []
-        correlation_magnitude_beam3 = []
-        correlation_magnitude_beam4 = []
-        for row in range(0, num_cells):
-            (a, b, c, d) = struct.unpack_from('<4B', data, offset)
-            correlation_magnitude_beam1.append(a)
-            correlation_magnitude_beam2.append(b)
-            correlation_magnitude_beam3.append(c)
-            correlation_magnitude_beam4.append(d)
-            offset += CORRELATION_BYTES_PER_CELL
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.CORRELATION_MAGNITUDE_BEAM1,
-                                                    correlation_magnitude_beam1, list))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.CORRELATION_MAGNITUDE_BEAM2,
-                                                    correlation_magnitude_beam2, list))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.CORRELATION_MAGNITUDE_BEAM3,
-                                                    correlation_magnitude_beam3, list))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.CORRELATION_MAGNITUDE_BEAM4,
-                                                    correlation_magnitude_beam4, list))
-
-    def parse_echo_intensity_data(self, data):
-        """
-        Parse the echo intensity portion of the particle
-        """
-        num_cells = self.num_depth_cells
-        offset = ID_BYTES
-
-        echo_intesity_beam1 = []
-        echo_intesity_beam2 = []
-        echo_intesity_beam3 = []
-        echo_intesity_beam4 = []
-        for row in range(0, num_cells):
-            (a, b, c, d) = struct.unpack_from('<4B', data, offset)
-            echo_intesity_beam1.append(a)
-            echo_intesity_beam2.append(b)
-            echo_intesity_beam3.append(c)
-            echo_intesity_beam4.append(d)
-            offset += ECHO_INTENSITY_BYTES_PER_CELL
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ECHO_INTENSITY_BEAM1,
-                                                    echo_intesity_beam1, list))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ECHO_INTENSITY_BEAM2,
-                                                    echo_intesity_beam2, list))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ECHO_INTENSITY_BEAM3,
-                                                    echo_intesity_beam3, list))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.ECHO_INTENSITY_BEAM4,
-                                                    echo_intesity_beam4, list))
-
-    def parse_percent_good_data(self, data):
-        """
-        Parse the percent good portion of the particle
-
-        """
-        num_cells = self.num_depth_cells
-        offset = ID_BYTES
-
-        percent_good_3beam = []
-        percent_transforms_reject = []
-        percent_bad_beams = []
-        percent_good_4beam = []
-        for row in range(0, num_cells):
-            (a, b, c, d) = struct.unpack_from('<4B', data, offset)
-            percent_good_3beam.append(a)
-            percent_transforms_reject.append(b)
-            percent_bad_beams.append(c)
-            percent_good_4beam.append(d)
-            offset += PERCENT_GOOD_BYTES_PER_CELL
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.PERCENT_GOOD_3BEAM,
-                                                    percent_good_3beam, list))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.PERCENT_TRANSFORMS_REJECT,
-                                                    percent_transforms_reject, list))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.PERCENT_BAD_BEAMS,
-                                                    percent_bad_beams, list))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.PERCENT_GOOD_4BEAM,
-                                                    percent_good_4beam, list))
-
-    def parse_bottom_track_data(self, data):
-        """
-        Parse the bottom track portion of the particle
-
-        """
-
-        log.debug("*** parse_bottom_track_data called***")
-        #info statement to find a record with bottom track data!
-
-        (bottom_track_id, bt_pings_per_ensemble, bt_delay_before_reacquire,
-         bt_corr_magnitude_min, bt_amp_magnitude_min, bt_percent_good_min,
-         bt_mode, bt_error_velocity_max, RESERVED, beam1_bt_range_lsb, beam2_bt_range_lsb,
-         beam3_bt_range_lsb, beam4_bt_range_lsb, eastward_bt_velocity,
-         northward_bt_velocity, upward_bt_velocity, error_bt_velocity,
-         beam1_bt_correlation, beam2_bt_correlation, beam3_bt_correlation,
-         beam4_bt_correlation, beam1_eval_amp, beam2_eval_amp, beam3_eval_amp,
-         beam4_eval_amp, beam1_bt_percent_good, beam2_bt_percent_good,
-         beam3_bt_percent_good, beam4_bt_percent_good, ref_layer_min,
-         ref_layer_near, ref_layer_far, beam1_ref_layer_velocity,
-         beam2_ref_layer_velocity, beam3_ref_layer_velocity,
-         beam4_ref_layer_velocity, beam1_ref_correlation, beam2_ref_correlation,
-         beam3_ref_correlation, beam4_ref_correlation, beam1_ref_intensity,
-         beam2_ref_intensity, beam3_ref_intensity, beam4_ref_intensity,
-         beam1_ref_percent_good, beam2_ref_percent_good, beam3_ref_percent_good,
-         beam4_ref_percent_good, bt_max_depth, beam1_rssi_amplitude,
-         beam2_rssi_amplitude, beam3_rssi_amplitude, beam4_rssi_amplitude,
-         bt_gain, beam1_bt_range_msb, beam2_bt_range_msb, beam3_bt_range_msb,
-         beam4_bt_range_msb) = \
-            struct.unpack_from('<3H4BHL4H4h12B3H4h12BH9B', data)
-            #Note, ADCPS has 4 additional reserved bytes at the end, which are
-            #not needed for either particle
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_PINGS_PER_ENSEMBLE,
-                                                    bt_pings_per_ensemble, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_DELAY_BEFORE_REACQUIRE,
-                                                    bt_delay_before_reacquire, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_CORR_MAGNITUDE_MIN,
-                                                    bt_corr_magnitude_min, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_EVAL_MAGNITUDE_MIN,
-                                                    bt_amp_magnitude_min, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_PERCENT_GOOD_MIN,
-                                                    bt_percent_good_min, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_MODE,
-                                                    bt_mode, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_ERROR_VELOCITY_MAX,
-                                                    bt_error_velocity_max, int))
-
-        #need to combine LSBs and MSBs of ranges
-        beam1_bt_range = beam1_bt_range_lsb + (beam1_bt_range_msb << 16)
-        beam2_bt_range = beam2_bt_range_lsb + (beam2_bt_range_msb << 16)
-        beam3_bt_range = beam3_bt_range_lsb + (beam3_bt_range_msb << 16)
-        beam4_bt_range = beam4_bt_range_lsb + (beam4_bt_range_msb << 16)
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM1_RANGE,
-                                                    beam1_bt_range, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM2_RANGE,
-                                                    beam2_bt_range, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM3_RANGE,
-                                                    beam3_bt_range, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM4_RANGE,
-                                                    beam4_bt_range, int))
-
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_EASTWARD_VELOCITY,
-                                                    eastward_bt_velocity, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_NORTHWARD_VELOCITY,
-                                                    northward_bt_velocity, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_UPWARD_VELOCITY,
-                                                    upward_bt_velocity, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_ERROR_VELOCITY,
-                                                    error_bt_velocity, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM1_CORRELATION,
-                                                    beam1_bt_correlation, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM2_CORRELATION,
-                                                    beam2_bt_correlation, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM3_CORRELATION,
-                                                    beam3_bt_correlation, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM4_CORRELATION,
-                                                    beam4_bt_correlation, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM1_EVAL_AMP,
-                                                    beam1_eval_amp, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM2_EVAL_AMP,
-                                                    beam2_eval_amp, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM3_EVAL_AMP,
-                                                    beam3_eval_amp, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM4_EVAL_AMP,
-                                                    beam4_eval_amp, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM1_PERCENT_GOOD,
-                                                    beam1_bt_percent_good, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM2_PERCENT_GOOD,
-                                                    beam2_bt_percent_good, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM3_PERCENT_GOOD,
-                                                    beam3_bt_percent_good, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM4_PERCENT_GOOD,
-                                                    beam4_bt_percent_good, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_REF_LAYER_MIN,
-                                                    ref_layer_min, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_REF_LAYER_NEAR,
-                                                    ref_layer_near, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_REF_LAYER_FAR,
-                                                    ref_layer_far, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_EASTWARD_REF_LAYER_VELOCITY,
-                                                    beam1_ref_layer_velocity, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_NORTHWARD_REF_LAYER_VELOCITY,
-                                                    beam2_ref_layer_velocity, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_UPWARD_REF_LAYER_VELOCITY,
-                                                    beam3_ref_layer_velocity, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_ERROR_REF_LAYER_VELOCITY,
-                                                    beam4_ref_layer_velocity, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM1_REF_CORRELATION,
-                                                    beam1_ref_correlation, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM2_REF_CORRELATION,
-                                                    beam2_ref_correlation, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM3_REF_CORRELATION,
-                                                    beam3_ref_correlation, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM4_REF_CORRELATION,
-                                                    beam4_ref_correlation, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM1_REF_INTENSITY,
-                                                    beam1_ref_intensity, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM2_REF_INTENSITY,
-                                                    beam2_ref_intensity, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM3_REF_INTENSITY,
-                                                    beam3_ref_intensity, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM4_REF_INTENSITY,
-                                                    beam4_ref_intensity, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM1_REF_PERCENT_GOOD,
-                                                    beam1_ref_percent_good, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM2_REF_PERCENT_GOOD,
-                                                    beam2_ref_percent_good, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM3_REF_PERCENT_GOOD,
-                                                    beam3_ref_percent_good, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM4_REF_PERCENT_GOOD,
-                                                    beam4_ref_percent_good, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_MAX_DEPTH,
-                                                    bt_max_depth, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM1_RSSI_AMPLITUDE,
-                                                    beam1_rssi_amplitude, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM2_RSSI_AMPLITUDE,
-                                                    beam2_rssi_amplitude, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM3_RSSI_AMPLITUDE,
-                                                    beam3_rssi_amplitude, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_BEAM4_RSSI_AMPLITUDE,
-                                                    beam4_rssi_amplitude, int))
-        self.final_result.append(self._encode_value(AdcpPd0ParserDataParticleKey.BT_GAIN,
-                                                    bt_gain, int))
-
-
-class AdcpPd0Parser(BufferLoadingParser):
-    def __init__(self,
-                 config,
-                 state,
-                 stream_handle,
-                 state_callback,
-                 publish_callback,
-                 *args, **kwargs):
-        super(AdcpPd0Parser, self).__init__(config,
-                                            stream_handle,
-                                            state,
-                                            self.sieve_function,
-                                            state_callback,
-                                            publish_callback,
-                                            *args,
-                                            **kwargs)
-
-        self._read_state = {StateKey.POSITION: 0}
-
-        if state:
-            self.set_state(self._state)
-
-    def set_state(self, state_obj):
-        """
-        Set the value of the state object for this parser
-        @param state_obj The object to set the state to. 
-        @throws DatasetParserException if there is a bad state structure
-        """
-        if not isinstance(state_obj, dict):
-            raise DatasetParserException("Invalid state structure")
-        if not (StateKey.POSITION in state_obj):
-            raise DatasetParserException("Invalid state keys")
-
-        self._record_buffer = []
-        self._state = state_obj
-        self._read_state = state_obj
-        self._chunker.clean_all_chunks()
-
-        # seek to the position
-        self._stream_handle.seek(state_obj[StateKey.POSITION])
-
-    def _increment_state(self, increment):
-        """
-        Increment the parser state
-        """
-        self._read_state[StateKey.POSITION] += increment
-
-    def parse_chunks(self):
-        """
-        Parse out any pending data chunks in the chunker. If
-        it is a valid data piece, build a particle, update the position and
-        timestamp. Go until the chunker has no more valid data.
-        @retval a list of tuples with sample particles encountered in this
-            parsing, plus the state. An empty list of nothing was parsed.
-        """
-        result_particles = []
-        (nd_timestamp, non_data, non_start, non_end) = self._chunker.get_next_non_data_with_index(clean=False)
-        (timestamp, chunk, start, end) = self._chunker.get_next_data_with_index()
-        self.handle_non_data(non_data, non_end, start)
-
-        while chunk is not None:
-
-            # particle-ize the data block received, return the record
-            sample = self._extract_sample(self._particle_class, None, chunk, None)
-            self._increment_state(len(chunk))
-            if sample:
-                # create particle
-
-                result_particles.append((sample, copy.copy(self._read_state)))
-
-            (nd_timestamp, non_data, non_start, non_end) = self._chunker.get_next_non_data_with_index(clean=False)
-            (timestamp, chunk, start, end) = self._chunker.get_next_data_with_index()
-            self.handle_non_data(non_data, non_end, start)
-
-        return result_particles
-
-    def handle_non_data(self, non_data, non_end, start):
-        """
-        handle data in the non_data chunker queue
-        @param non_data data in the non data chunker queue
-        @param non_end ending index of the non_data chunk
-        @param start start index of the next data chunk
-        """
-        # we can get non_data after our current chunk, check that this chunk is before that chunk
-        if non_data is not None and non_end <= start:
-
-            self._exception_callback(UnexpectedDataException("Found %d bytes of un-expected non-data:%s" %
-                                                             (len(non_data), non_data)))
-            self._increment_state(len(non_data))
-
-    def sieve_function(self, input_buffer):
-        """
-        Sort through the input buffer looking for a data record.
-        A data record is considered to be properly framed if there is a
-        sync word and the checksum matches.
-        Arguments:
-          input_buffer - the contents of the input stream
-        Returns:
-          A list of start,end tuples
-        """
-
-        #log.debug("sieve called with buffer of length %d", len(input_buffer))
-
-        indices_list = []  # initialize the return list to empty
-        header_iter = ADCPS_PD0_HEADER_MATCHER.finditer(input_buffer[0: -CHECKSUM_BYTES])
-        #find all occurrences of the record header sentinel
-        #don't look in the last 2 bytes because you will not have num bytes
-
-        for match in header_iter:
-
-            record_start = match.start()
-            #place in string where sentinel was found
-
-            #log.debug("sieve function found sentinel at byte  %d", record_start)
-
-            num_bytes = struct.unpack("<H", input_buffer[record_start + 2: record_start + 4])[0]
-            # get the number of bytes in the record, does not include the 2 checksum bytes
-
-            record_end = record_start + num_bytes
-
-            #log.debug("sieve function number of bytes= %d , record end is %d", num_bytes, record_end)
-
-            #if there is enough in the buffer check the record
-            if record_end <= len(input_buffer[0: -CHECKSUM_BYTES]):
-                #make sure the checksum bytes are in the buffer too
-
-                total = 0
-                for i in range(record_start, record_end):
-                    total += ord(input_buffer[i])
-                #add up all the bytes in the record
-
-                checksum = total & CHECKSUM_MODULO  # bitwise and with 65535 or mod vs 65536
-
-                #log.debug("sieve checksum & total = %d %d ", checksum, total)
-
-                if checksum == struct.unpack("<H", input_buffer[record_end: record_end + CHECKSUM_BYTES])[0]:
-                    #verify the checksum
-                    indices_list.append((record_start, record_end + CHECKSUM_BYTES))
-                    #include the 2 checksum bytes in the chunk
-
-                    #log.debug("sieve function found record.  Start = %d End = %d", record_start, record_end)
-
-        return indices_list
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+            position = self._stream_handle.tell()  # set the new file position
+            header_id_bytes = self._stream_handle.read(2)  # read the next two bytes of the file

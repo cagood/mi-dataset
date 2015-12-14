@@ -10,14 +10,13 @@ import os
 from mi.logging import config
 
 from mi.dataset.driver.moas.gl.engineering.driver_common import GliderEngineeringDriver
-
-from mi.dataset.parser.glider import EngineeringTelemeteredDataParticle
-from mi.dataset.parser.glider import EngineeringMetadataDataParticle
-from mi.dataset.parser.glider import EngineeringScienceTelemeteredDataParticle
+from mi.dataset.parser.glider import EngineeringClassKey
 
 from mi.dataset.dataset_parser import DataSetDriverConfigKeys
 
+from mi.core.versioning import version
 
+@version("15.6.0")
 def parse(basePythonCodePath, sourceFilePath, particleDataHdlrObj):
     """
     Initialize the parser configuration and build the driver
@@ -29,9 +28,11 @@ def parse(basePythonCodePath, sourceFilePath, particleDataHdlrObj):
 
     parser_config = {
         DataSetDriverConfigKeys.PARTICLE_MODULE: 'mi.dataset.parser.glider',
-        DataSetDriverConfigKeys.PARTICLE_CLASS: [EngineeringMetadataDataParticle,
-                                                 EngineeringTelemeteredDataParticle,
-                                                 EngineeringScienceTelemeteredDataParticle]
+        DataSetDriverConfigKeys.PARTICLE_CLASSES_DICT: {
+            EngineeringClassKey.METADATA: 'EngineeringMetadataDataParticle',
+            EngineeringClassKey.DATA: 'EngineeringTelemeteredDataParticle',
+            EngineeringClassKey.SCIENCE: 'EngineeringScienceTelemeteredDataParticle'
+        }
     }
 
     driver = GliderEngineeringDriver(sourceFilePath, particleDataHdlrObj, parser_config)
